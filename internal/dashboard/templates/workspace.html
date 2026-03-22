@@ -1,0 +1,297 @@
+{{define "workspace.content"}}
+<div class="page-head">
+    <div>
+        <h1>工作区文件</h1>
+        <p class="page-subtitle">管理工作区的 Markdown 配置文件</p>
+    </div>
+    <button class="btn btn-primary" onclick="createNewFile()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14"/>
+        </svg>
+        新建文件
+    </button>
+</div>
+
+<div class="workspace-info">
+    <div class="info-label">工作区目录:</div>
+    <div class="info-path">{{.WorkDir}}</div>
+</div>
+
+<div class="workspace-container">
+    <div class="file-list-panel">
+        <div class="panel-header">
+            <h3>文件列表</h3>
+        </div>
+        <div class="file-list" id="fileList">
+            {{range .Files}}
+            {{if not .IsDir}}
+            <div class="file-item" onclick="loadFile('{{.Path}}')" data-path="{{.Path}}">
+                <div class="file-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                        <polyline points="10 9 9 9 8 9"/>
+                    </svg>
+                </div>
+                <div class="file-info">
+                    <div class="file-name">{{.Name}}</div>
+                    <div class="file-meta">{{.ModTime}} • {{formatSize .Size}}</div>
+                </div>
+            </div>
+            {{end}}
+            {{end}}
+        </div>
+    </div>
+
+    <div class="editor-panel">
+        <div class="panel-header">
+            <h3 id="editorTitle">文件编辑器</h3>
+            <div class="editor-actions">
+                <button class="btn btn-secondary" onclick="cancelEdit()">取消</button>
+                <button class="btn btn-primary" onclick="saveFile()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                        <polyline points="17 21 17 13 7 13 7 21"/>
+                        <polyline points="7 3 7 8 15 8"/>
+                    </svg>
+                    保存
+                </button>
+            </div>
+        </div>
+        <div class="editor-path" id="editorPath"></div>
+        <textarea id="fileEditor" placeholder="选择或创建一个文件开始编辑..."></textarea>
+    </div>
+</div>
+
+<style>
+.workspace-info {
+    background: var(--bg-tertiary);
+    padding: 16px 20px;
+    border-radius: var(--radius-md);
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.info-label {
+    font-size: 14px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.info-path {
+    font-size: 14px;
+    color: var(--text-primary);
+    font-family: 'Courier New', monospace;
+}
+
+.workspace-container {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 24px;
+    height: calc(100vh - 300px);
+    min-height: 500px;
+}
+
+.file-list-panel,
+.editor-panel {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.panel-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.panel-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.file-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.file-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.file-item:hover {
+    background: var(--bg-hover);
+}
+
+.file-item.active {
+    background: var(--accent-soft);
+}
+
+.file-icon {
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.file-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.file-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.editor-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.editor-path {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-family: 'Courier New', monospace;
+    background: var(--bg-tertiary);
+}
+
+#fileEditor {
+    flex: 1;
+    width: 100%;
+    padding: 20px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: none;
+    resize: none;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+#fileEditor:focus {
+    outline: none;
+}
+</style>
+
+<script>
+let currentFilePath = '';
+
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function loadFile(filePath) {
+    // Update active state
+    document.querySelectorAll('.file-item').forEach(item => {
+        item.classList.remove('active');
+    });
+    const activeItem = document.querySelector(`.file-item[data-path="${filePath}"]`);
+    if (activeItem) {
+        activeItem.classList.add('active');
+    }
+
+    currentFilePath = filePath;
+    document.getElementById('editorPath').textContent = filePath;
+    document.getElementById('editorTitle').textContent = '编辑：' + filePath.split('/').pop();
+
+    fetch(`/api/workspace/file?path=${encodeURIComponent(filePath)}`)
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('fileEditor').value = data.content || '';
+        })
+        .catch(err => {
+            console.error('Failed to load file:', err);
+            alert('Failed to load file: ' + err);
+        });
+}
+
+function saveFile() {
+    if (!currentFilePath) {
+        alert('Please select a file first');
+        return;
+    }
+
+    const content = document.getElementById('fileEditor').value;
+    
+    fetch('/api/workspace/file', {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            path: currentFilePath,
+            content: content
+        })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success) {
+            alert('File saved successfully!');
+            // Reload file list
+            location.reload();
+        } else {
+            alert('Failed to save file: ' + (data.error || 'Unknown error'));
+        }
+    })
+    .catch(err => {
+        console.error('Failed to save file:', err);
+        alert('Failed to save file: ' + err);
+    });
+}
+
+function cancelEdit() {
+    currentFilePath = '';
+    document.getElementById('fileEditor').value = '';
+    document.getElementById('editorPath').textContent = '';
+    document.getElementById('editorTitle').textContent = '文件编辑器';
+    document.querySelectorAll('.file-item').forEach(item => {
+        item.classList.remove('active');
+    });
+}
+
+function createNewFile() {
+    const filename = prompt('Enter new file name (e.g., my-config.md):');
+    if (!filename) return;
+    
+    if (!filename.toLowerCase().endsWith('.md')) {
+        alert('File name must end with .md');
+        return;
+    }
+    
+    currentFilePath = filename;
+    document.getElementById('editorPath').textContent = filename;
+    document.getElementById('editorTitle').textContent = '新建：' + filename;
+    document.getElementById('fileEditor').value = '';
+    document.getElementById('fileEditor').focus();
+}
+</script>
+{{end}}

@@ -1,0 +1,430 @@
+{{define "conversation.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "conversation.content"}}
+<section class="page-head">
+    <div>
+        <h1>对话</h1>
+        <div class="page-subtitle">会话 ID: <span id="sessionLabel">{{.SessionID}}</span></div>
+    </div>
+    <div class="actions">
+        <a class="btn btn-secondary" href="/conversations">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            返回
+        </a>
+    </div>
+</section>
+
+<div id="chatBanner" class="banner"></div>
+
+<div class="chat-container">
+    <div class="chat-main">
+        <div class="chat-info-bar">
+            <div class="info-left">
+                <div id="sessionMeta" class="session-meta"></div>
+            </div>
+            <div class="info-right">
+                <div id="sessionQuickInfo" class="quick-info"></div>
+                <button class="btn btn-secondary btn-sm" onclick="clearChat()">清空</button>
+            </div>
+        </div>
+        <div class="chat-messages" id="messages">
+            <div class="empty">正在加载消息...</div>
+        </div>
+        <div class="chat-input-area">
+            <div class="chat-input-wrapper">
+                <textarea id="chatInput" class="chat-input" placeholder="输入你的消息...（Shift+Enter 换行）" rows="1"></textarea>
+                <button class="btn btn-primary send-btn" onclick="sendMessage()" id="sendBtn">
+                    <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const sessionId = "{{.SessionID}}";
+let isSending = false;
+let ws = null;
+
+// Initialize WebSocket connection
+function initWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = function() {
+        console.log('WebSocket connected');
+        // Authenticate after connection
+        const authMsg = {
+            type: 'auth',
+            payload: {
+                platform: 'dashboard',
+                platform_chat_id: 'dashboard-web-' + Date.now()
+            }
+        };
+        console.log('Sending auth message:', JSON.stringify(authMsg));
+        ws.send(JSON.stringify(authMsg));
+        console.log('Auth message sent');
+    };
+    
+    ws.onmessage = function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('WebSocket message received:', data);
+            
+            // Handle auth response
+            if (data.type === 'auth_ok') {
+                console.log('WebSocket authenticated successfully, client_id:', data.payload.client_id);
+                return;
+            }
+            
+            // Handle error
+            if (data.type === 'error') {
+                console.error('WebSocket error:', data.payload.message);
+                return;
+            }
+            
+            if (data.type === 'new_message' && data.payload.session_id === sessionId) {
+                // New message received, update UI
+                // The actual message content is in data.payload.message
+                handleNewMessage(data.payload.message);
+            } else if (data.type === 'session_update' && data.payload.session_id === sessionId) {
+                // Session updated, refresh
+                loadConversation();
+            }
+        } catch (err) {
+            console.error('Failed to parse WebSocket message:', err);
+        }
+    };
+    
+    ws.onclose = function() {
+        console.log('WebSocket disconnected, reconnecting...');
+        setTimeout(initWebSocket, 3000); // Reconnect after 3 seconds
+    };
+    
+    ws.onerror = function(error) {
+        console.error('WebSocket error:', error);
+    };
+}
+
+// Handle new message from WebSocket
+function handleNewMessage(payload) {
+    console.log('Handling new message from WebSocket:', payload);
+    
+    // Remove "thinking" message if exists
+    const lastMsg = document.querySelector('.message.assistant:last-child');
+    if (lastMsg && lastMsg.querySelector('.message-content').textContent === '思考中...') {
+        lastMsg.remove();
+    }
+    
+    // Add assistant message with tool calls
+    if (payload.content) {
+        appendMessage('assistant', payload.content, payload.tool_calls || []);
+    }
+    
+    // Update session info
+    updateSessionInfo();
+}
+
+function showChatBanner(message, isError = false) {
+    const el = document.getElementById('chatBanner');
+    el.textContent = message;
+    el.className = isError ? 'banner error' : 'banner info';
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function renderMessages(messages) {
+    const container = document.getElementById('messages');
+    if (!messages || messages.length === 0) {
+        container.innerHTML = '<div class="empty">暂无消息，开始对话吧！</div>';
+        return;
+    }
+
+    container.innerHTML = messages.map(msg => {
+        const isUser = msg.role === 'user';
+        const isAssistant = msg.role === 'assistant';
+        
+        // 检查是否有工具调用
+        const toolCalls = msg.tool_calls || [];
+        
+        if (isAssistant && toolCalls.length > 0) {
+            // 渲染带工具调用的助手消息
+            let toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
+                const isSuccess = tc.success !== false;
+                return `
+                <details class="tool-call ${isSuccess ? 'success' : 'error'}">
+                    <summary class="tool-call-summary">
+                        <span class="tool-call-icon">🔧</span>
+                        <span class="tool-call-name">${escapeHtml(tc.tool_name)}</span>
+                        <span class="tool-call-status">${isSuccess ? '✓' : '✗'}</span>
+                        <span class="tool-call-toggle">${isSuccess ? '展开' : '查看错误'}</span>
+                    </summary>
+                    <div class="tool-call-content">
+                        <div class="tool-call-label">输入:</div>
+                        <pre>${escapeHtml(typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input))}</pre>
+                        <div class="tool-call-label">输出:</div>
+                        <pre>${escapeHtml(tc.output)}</pre>
+                    </div>
+                </details>
+            `}).join('')}</div>`;
+            
+            return `
+                <div class="message assistant">
+                    <div class="message-avatar">🤖</div>
+                    <div class="message-body">
+                        <div class="message-role">助手</div>
+                        <div class="message-content">${escapeHtml(msg.content || '')}${toolCallsHtml}</div>
+                    </div>
+                </div>
+            `;
+        } else {
+            // 渲染普通消息
+            return `
+                <div class="message ${isUser ? 'user' : 'assistant'}">
+                    <div class="message-avatar">
+                        ${isUser ? '👤' : '🤖'}
+                    </div>
+                    <div class="message-body">
+                        <div class="message-role">${isUser ? '用户' : '助手'}</div>
+                        <div class="message-content">${escapeHtml(msg.content || '')}</div>
+                    </div>
+                </div>
+            `;
+        }
+    }).join('');
+
+    container.scrollTop = container.scrollHeight;
+}
+
+function appendMessage(role, content, toolCalls = []) {
+    const container = document.getElementById('messages');
+    const emptyEl = container.querySelector('.empty');
+    if (emptyEl) {
+        emptyEl.remove();
+    }
+
+    const isUser = role === 'user';
+    let toolCallsHtml = '';
+    if (toolCalls && toolCalls.length > 0) {
+        toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
+            console.log('Appending tool call:', tc);
+            return `
+            <div class="tool-call ${tc.success ? 'success' : 'error'}">
+                <div class="tool-call-header">
+                    <span class="tool-call-icon">🔧</span>
+                    <span class="tool-call-name">${escapeHtml(tc.tool_name || tc.toolName || 'Unknown')}</span>
+                    <span class="tool-call-status">${tc.success ? '✓' : '✗'}</span>
+                </div>
+                <div class="tool-call-content">
+                    <div class="tool-call-label">输入:</div>
+                    <pre>${escapeHtml(tc.input || tc.Input || '')}</pre>
+                    <div class="tool-call-label">输出:</div>
+                    <pre>${escapeHtml(tc.output || tc.Output || '')}</pre>
+                </div>
+            </div>
+        `}).join('')}</div>`;
+    }
+
+    const messageHtml = `
+        <div class="message ${isUser ? 'user' : 'assistant'}">
+            <div class="message-avatar">
+                ${isUser ? '👤' : '🤖'}
+            </div>
+            <div class="message-body">
+                <div class="message-role">${isUser ? '用户' : '助手'}</div>
+                <div class="message-content">${escapeHtml(content)}${toolCallsHtml}</div>
+            </div>
+        </div>
+    `;
+
+    container.insertAdjacentHTML('beforeend', messageHtml);
+    container.scrollTop = container.scrollHeight;
+}
+
+function updateAssistantMessage(content, toolCalls = []) {
+    const container = document.getElementById('messages');
+    const lastMessage = container.querySelector('.message.assistant:last-child');
+    
+    console.log('updateAssistantMessage called with:', { content, toolCalls });
+    console.log('toolCalls length:', toolCalls ? toolCalls.length : 'undefined');
+    console.log('lastMessage:', lastMessage);
+    
+    let toolCallsHtml = '';
+    if (toolCalls && toolCalls.length > 0) {
+        console.log('Rendering tool calls...');
+        toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
+            console.log('Rendering tool call:', tc);
+            const toolName = tc.tool_name || tc.toolName || 'Unknown';
+            const toolInput = tc.input || tc.Input || '';
+            const toolOutput = tc.output || tc.Output || '';
+            const isSuccess = tc.success;
+            
+            return `
+            <details class="tool-call ${isSuccess ? 'success' : 'error'}">
+                <summary class="tool-call-summary">
+                    <span class="tool-call-icon">🔧</span>
+                    <span class="tool-call-name">${escapeHtml(toolName)}</span>
+                    <span class="tool-call-status">${isSuccess ? '✓' : '✗'}</span>
+                    <span class="tool-call-toggle">${isSuccess ? '展开' : '查看错误'}</span>
+                </summary>
+                <div class="tool-call-content">
+                    <div class="tool-call-label">输入:</div>
+                    <pre>${escapeHtml(toolInput)}</pre>
+                    <div class="tool-call-label">输出:</div>
+                    <pre>${escapeHtml(toolOutput)}</pre>
+                </div>
+            </details>
+        `}).join('')}</div>`;
+        console.log('toolCallsHtml generated:', toolCallsHtml);
+    }
+
+    const messageContent = escapeHtml(content) + toolCallsHtml;
+    console.log('Final messageContent:', messageContent);
+    console.log('content escaped:', escapeHtml(content));
+
+    if (lastMessage) {
+        const contentEl = lastMessage.querySelector('.message-content');
+        console.log('contentEl:', contentEl);
+        console.log('Setting innerHTML to:', messageContent);
+        contentEl.innerHTML = messageContent;
+        console.log('innerHTML after set:', contentEl.innerHTML);
+    } else {
+        console.log('No last message, appending new one');
+        appendMessage('assistant', content, toolCalls);
+    }
+    
+    container.scrollTop = container.scrollHeight;
+}
+
+async function loadConversation() {
+    if (!sessionId) {
+        document.getElementById('messages').innerHTML = '<div class="empty">缺少 session_id。</div>';
+        return;
+    }
+
+    const response = await fetch('/api/session?id=' + encodeURIComponent(sessionId));
+    const data = await response.json();
+    if (!response.ok) {
+        showChatBanner(data.error || '加载对话失败', true);
+        document.getElementById('messages').innerHTML = '<div class="empty">加载失败。</div>';
+        return;
+    }
+
+    const session = data.session || {};
+    document.getElementById('sessionMeta').textContent = `Agent ID: ${session.agent_id || '-'} | 状态：${session.status || '-'}`;
+    document.getElementById('sessionQuickInfo').innerHTML = `
+        <span class="quick-info-item"><strong>${escapeHtml(session.title || '未命名')}</strong></span>
+        <span class="quick-info-divider">|</span>
+        <span class="quick-info-item">${data.messages?.length || 0} 条消息</span>
+    `;
+    renderMessages(data.messages || []);
+}
+
+async function sendMessage() {
+    if (isSending) return;
+    
+    const input = document.getElementById('chatInput');
+    const content = input.value.trim();
+    if (!content) {
+        showChatBanner('请输入消息', true);
+        return;
+    }
+
+    isSending = true;
+    const sendBtn = document.getElementById('sendBtn');
+    sendBtn.disabled = true;
+    sendBtn.innerHTML = '<span>...</span>';
+
+    // 立即显示用户消息
+    appendMessage('user', content);
+    input.value = '';
+    input.style.height = 'auto';
+
+    // 创建空的助手消息
+    appendMessage('assistant', '思考中...');
+
+    try {
+        const response = await fetch('/api/messages', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ session_id: sessionId, content })
+        });
+        
+        const data = await response.json();
+        console.log('API Response:', data);
+
+        if (!response.ok) {
+            showChatBanner(data.error || '发送失败', true);
+            // 移除空的助手消息
+            const lastMsg = document.querySelector('.message.assistant:last-child');
+            if (lastMsg && lastMsg.querySelector('.message-content').textContent === '思考中...') {
+                lastMsg.remove();
+            }
+            return;
+        }
+
+        // WebSocket will handle the response update
+        // Just keep the "thinking" message until WebSocket response arrives
+        console.log('Message sent, waiting for WebSocket response...');
+    } catch (err) {
+        showChatBanner('请求失败：' + err.message, true);
+    } finally {
+        isSending = false;
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>';
+        
+        // 更新会话信息，但不重新渲染消息（避免覆盖工具调用显示）
+        updateSessionInfo();
+    }
+}
+
+async function updateSessionInfo() {
+    if (!sessionId) return;
+    
+    try {
+        const response = await fetch('/api/session?id=' + encodeURIComponent(sessionId));
+        const data = await response.json();
+        if (response.ok && data.session) {
+            const session = data.session;
+            document.getElementById('sessionMeta').textContent = `Agent ID: ${session.agent_id || '-'} | 状态：${session.status || '-'}`;
+            document.getElementById('sessionQuickInfo').innerHTML = `
+                <span class="quick-info-item"><strong>${escapeHtml(session.title || '未命名')}</strong></span>
+                <span class="quick-info-divider">|</span>
+                <span class="quick-info-item">${data.messages?.length || 0} 条消息</span>
+            `;
+        }
+    } catch (err) {
+        console.error('Failed to update session info:', err);
+    }
+}
+
+function clearChat() {
+    document.getElementById('messages').innerHTML = '<div class="empty">聊天已清空。</div>';
+}
+
+document.getElementById('chatInput').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+document.getElementById('chatInput').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+});
+
+// Initialize WebSocket on page load
+initWebSocket();
+
+loadConversation();
+</script>
+{{end}}

@@ -1,0 +1,188 @@
+{{define "agents.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "agents.content"}}
+<section class="page-head">
+    <div>
+        <h1>Agent 管理</h1>
+        <div class="page-subtitle">创建和管理你的 AI Agent</div>
+    </div>
+</section>
+
+<div id="agentBanner" class="banner"></div>
+
+<section class="grid grid-2">
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">创建 Agent</span>
+        </div>
+        <div class="field">
+            <label>名称</label>
+            <input id="agentName" placeholder="客服 Agent">
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>描述</label>
+            <input id="agentDescription" placeholder="处理简单问答">
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>模型</label>
+            <input id="agentModel" placeholder="gpt-4">
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>系统提示词</label>
+            <textarea id="agentPrompt" placeholder="你是一个简洁有用的助手。"></textarea>
+        </div>
+        <div class="actions" style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="createAgent()">创建 Agent</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">已有 Agent</span>
+        </div>
+        <div id="agentList" class="list">
+            {{range .Agents}}
+            <div class="item">
+                <div class="item-header">
+                    <div>
+                        <div class="item-title">{{.Name}}</div>
+                        <div class="item-meta">{{if .Description}}{{.Description}}{{else}}暂无描述{{end}}</div>
+                    </div>
+                    <span class="pill pill-success">{{.Status}}</span>
+                </div>
+                <div class="item-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="fillEdit({{.ID}}, '{{js .Name}}', '{{js .Description}}', '{{js .Model}}', '{{js .Prompt}}', '{{js .Status}}')">编辑</button>
+                    <button class="btn btn-danger btn-sm" onclick="removeAgent({{.ID}})">删除</button>
+                </div>
+            </div>
+            {{else}}
+            <div class="empty">暂无 Agent，创建一个开始使用。</div>
+            {{end}}
+        </div>
+    </div>
+</section>
+
+<section class="card" style="margin-top: 24px;">
+    <div class="card-header">
+        <span class="card-title">编辑 Agent</span>
+    </div>
+    <input type="hidden" id="editAgentId">
+    <div class="grid grid-2">
+        <div class="field">
+            <label>名称</label>
+            <input id="editAgentName">
+        </div>
+        <div class="field">
+            <label>状态</label>
+            <select id="editAgentStatus">
+                <option value="active">活跃</option>
+                <option value="paused">暂停</option>
+                <option value="stopped">停止</option>
+            </select>
+        </div>
+    </div>
+    <div class="field" style="margin-top: 14px;">
+        <label>描述</label>
+        <input id="editAgentDescription">
+    </div>
+    <div class="field" style="margin-top: 14px;">
+        <label>模型</label>
+        <input id="editAgentModel">
+    </div>
+    <div class="field" style="margin-top: 14px;">
+        <label>系统提示词</label>
+        <textarea id="editAgentPrompt"></textarea>
+    </div>
+    <div class="actions" style="margin-top: 16px;">
+        <button class="btn btn-primary" onclick="updateAgent()">保存修改</button>
+    </div>
+</section>
+
+<script>
+function showBanner(message, isError = false) {
+    const el = document.getElementById('agentBanner');
+    el.textContent = message;
+    el.className = isError ? 'banner error' : 'banner';
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+async function createAgent() {
+    const payload = {
+        name: document.getElementById('agentName').value.trim(),
+        description: document.getElementById('agentDescription').value.trim(),
+        model: document.getElementById('agentModel').value.trim(),
+        prompt: document.getElementById('agentPrompt').value.trim()
+    };
+    if (!payload.name) {
+        showBanner('名称不能为空', true);
+        return;
+    }
+
+    const response = await fetch('/api/agents', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        showBanner(data.error || '创建 Agent 失败', true);
+        return;
+    }
+    showBanner('Agent 创建成功！');
+    setTimeout(() => { window.location.reload(); }, 1000);
+}
+
+function fillEdit(id, name, desc, model, prompt, status) {
+    document.getElementById('editAgentId').value = id;
+    document.getElementById('editAgentName').value = name;
+    document.getElementById('editAgentDescription').value = desc;
+    document.getElementById('editAgentModel').value = model;
+    document.getElementById('editAgentPrompt').value = prompt;
+    document.getElementById('editAgentStatus').value = status;
+    document.querySelector('.card:last-of-type .card-title').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function updateAgent() {
+    const id = document.getElementById('editAgentId').value;
+    if (!id) {
+        showBanner('请先选择一个 Agent', true);
+        return;
+    }
+
+    const payload = {
+        name: document.getElementById('editAgentName').value.trim(),
+        description: document.getElementById('editAgentDescription').value.trim(),
+        model: document.getElementById('editAgentModel').value.trim(),
+        prompt: document.getElementById('editAgentPrompt').value.trim(),
+        status: document.getElementById('editAgentStatus').value
+    };
+
+    const response = await fetch('/api/agent?id=' + id, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        showBanner(data.error || '更新 Agent 失败', true);
+        return;
+    }
+    showBanner('Agent 更新成功！');
+    setTimeout(() => { window.location.reload(); }, 1000);
+}
+
+async function removeAgent(id) {
+    if (!confirm('确定要删除这个 Agent 吗？')) return;
+
+    const response = await fetch('/api/agent?id=' + id, { method: 'DELETE' });
+    if (!response.ok) {
+        const data = await response.json();
+        showBanner(data.error || '删除 Agent 失败', true);
+        return;
+    }
+    showBanner('Agent 删除成功！');
+    setTimeout(() => { window.location.reload(); }, 1000);
+}
+</script>
+{{end}}

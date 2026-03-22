@@ -1,0 +1,48 @@
+{{define "settings.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "settings.content"}}
+<section class="page-head">
+    <div>
+        <h1>设置</h1>
+        <div class="page-subtitle">当前运行时配置</div>
+    </div>
+</section>
+
+<section class="grid grid-2">
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">服务器</span>
+        </div>
+        <div class="field">
+            <label>主机</label>
+            <input value="{{.Config.Server.Host}}" readonly>
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>端口</label>
+            <input value="{{.Config.Server.Port}}" readonly>
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>WebSocket 路径</label>
+            <input value="{{.Config.Server.WSPath}}" readonly>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">LLM 提供商</span>
+        </div>
+        <div class="field">
+            <label>模型</label>
+            <input value="{{.Config.LLMProvider.Model}}" readonly>
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>Base URL</label>
+            <input value="{{.Config.LLMProvider.BaseUrl}}" readonly>
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>最大 Token 数</label>
+            <input value="{{.Config.LLMProvider.MaxTokens}}" readonly>
+        </div>
+    </div>
+</section>
+{{end}}

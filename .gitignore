@@ -1,0 +1,49 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.db
+*.dylib
+go-claw
+
+.claude/
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directory
+data/
+
+# Config with secrets (use config.yaml.example)
+config.yaml
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+
+# Temporary files
+tmp/
+temp/

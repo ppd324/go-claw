@@ -1,0 +1,93 @@
+{{define "conversations.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "conversations.content"}}
+<section class="page-head">
+    <div>
+        <h1>会话历史</h1>
+        <div class="page-subtitle">创建会话和管理对话</div>
+    </div>
+</section>
+
+<div id="conversationBanner" class="banner"></div>
+
+<section class="grid grid-2">
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">创建会话</span>
+        </div>
+        <div class="field">
+            <label>Agent</label>
+            <select id="sessionAgent">
+                <option value="">选择 Agent...</option>
+                {{range .Agents}}
+                <option value="{{.ID}}">{{.Name}}</option>
+                {{end}}
+            </select>
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>标题</label>
+            <input id="sessionTitle" placeholder="新对话">
+        </div>
+        <div class="actions" style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="createSession()">创建会话</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">最近会话</span>
+        </div>
+        <div class="list">
+            {{range .Sessions}}
+            <div class="item">
+                <div class="item-header">
+                    <div>
+                        <div class="item-title">{{.Title}}</div>
+                        <div class="item-meta">{{.AgentName}} · {{.Platform}}</div>
+                    </div>
+                    <span class="pill {{if eq .Status "active"}}pill-success{{else}}pill-muted{{end}}">{{.Status}}</span>
+                </div>
+                <div class="item-actions">
+                    <span class="item-meta">{{.MessageCount}} 条消息 · {{.CreatedAt}}</span>
+                    <a class="btn btn-secondary btn-sm" href="/c/?id={{.SessionID}}">打开</a>
+                </div>
+            </div>
+            {{else}}
+            <div class="empty">暂无会话，创建一个开始使用。</div>
+            {{end}}
+        </div>
+    </div>
+</section>
+
+<script>
+function showConversationBanner(message, isError = false) {
+    const el = document.getElementById('conversationBanner');
+    el.textContent = message;
+    el.className = isError ? 'banner error' : 'banner';
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+async function createSession() {
+    const agentId = document.getElementById('sessionAgent').value;
+    const title = document.getElementById('sessionTitle').value.trim() || '新对话';
+
+    if (!agentId) {
+        showConversationBanner('请选择一个 Agent', true);
+        return;
+    }
+
+    const response = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ agent_id: Number(agentId), title })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        showConversationBanner(data.error || '创建会话失败', true);
+        return;
+    }
+    window.location.href = '/c/?id=' + data.session_id;
+}
+</script>
+{{end}}

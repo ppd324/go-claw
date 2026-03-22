@@ -1,0 +1,133 @@
+{{define "dashboard.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "dashboard.content"}}
+<section class="page-head">
+    <div>
+        <h1>控制台</h1>
+        <div class="page-subtitle">Agent 运行时概览和快捷操作</div>
+    </div>
+    <div class="actions">
+        <a class="btn btn-secondary" href="/conversations">会话历史</a>
+        <a class="btn btn-primary" href="/agents">管理 Agent</a>
+    </div>
+</section>
+
+<section class="grid grid-3">
+    <div class="card stat-card">
+        <div class="stat-label">Agents</div>
+        <div class="stat-number">{{.Stats.TotalAgents}}</div>
+        <div class="stat-desc">已创建的 Agent 数量</div>
+    </div>
+    <div class="card stat-card">
+        <div class="stat-label">活跃会话</div>
+        <div class="stat-number">{{.Stats.ActiveSessions}}</div>
+        <div class="stat-desc">当前活跃的对话数</div>
+    </div>
+    <div class="card stat-card">
+        <div class="stat-label">消息数</div>
+        <div class="stat-number">{{.Stats.TotalMessages}}</div>
+        <div class="stat-desc">已持久化的消息记录</div>
+    </div>
+</section>
+
+<section class="card" style="margin-top: 24px;">
+    <div class="card-header">
+        <span class="card-title">最近 Agent</span>
+        <a class="btn btn-secondary btn-sm" href="/agents">查看全部</a>
+    </div>
+    <div class="list">
+        {{range .Agents}}
+        <div class="item">
+            <div class="item-header">
+                <div>
+                    <div class="item-title">{{.Name}}</div>
+                    <div class="item-meta">{{if .Description}}{{.Description}}{{else}}暂无描述{{end}}</div>
+                </div>
+                <span class="pill pill-success">{{.Status}}</span>
+            </div>
+            <div class="item-actions">
+                <span class="item-meta">模型: {{if .Model}}{{.Model}}{{else}}默认{{end}}</span>
+            </div>
+        </div>
+        {{else}}
+        <div class="empty">暂无 Agent，前往 Agent 管理页面创建一个。</div>
+        {{end}}
+    </div>
+</section>
+
+<section class="grid grid-2" style="margin-top: 24px;">
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">快捷对话</span>
+        </div>
+        <div class="muted" style="font-size: 13px; margin-bottom: 16px;">选择一个 Agent，创建会话，开始聊天。</div>
+        <div id="quickChatBanner" class="banner" style="margin-bottom: 14px;"></div>
+        <div class="field">
+            <label>Agent</label>
+            <select id="quickAgent">
+                <option value="">选择 Agent...</option>
+                {{range .Agents}}
+                <option value="{{.ID}}">{{.Name}}</option>
+                {{end}}
+            </select>
+        </div>
+        <div class="field" style="margin-top: 14px;">
+            <label>会话标题</label>
+            <input id="quickSessionTitle" placeholder="快捷对话">
+        </div>
+        <div class="actions" style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="createQuickSession()">创建会话</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">关于 Go-Claw</span>
+        </div>
+        <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.7;">
+            <p><strong>Go-Claw</strong> 是一个 AI Agent 框架，支持工具调用、会话管理和多平台集成。</p>
+            <p style="margin-top: 12px;">主要特性：</p>
+            <ul style="margin-top: 8px; padding-left: 20px;">
+                <li>工具调用（执行命令、文件操作、待办事项）</li>
+                <li>会话持久化（SQLite）</li>
+                <li>多种 LLM 提供商支持</li>
+                <li>多平台集成</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<script>
+let quickSessionId = '';
+
+function showQuickBanner(message, isError = false) {
+    const el = document.getElementById('quickChatBanner');
+    el.textContent = message;
+    el.className = isError ? 'banner error' : 'banner';
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+async function createQuickSession() {
+    const agentId = document.getElementById('quickAgent').value;
+    const title = document.getElementById('quickSessionTitle').value.trim() || '快捷对话';
+
+    if (!agentId) {
+        showQuickBanner('请选择一个 Agent', true);
+        return;
+    }
+
+    const response = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ agent_id: Number(agentId), title })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+        showQuickBanner(data.error || '创建会话失败', true);
+        return;
+    }
+    window.location.href = '/c/?id=' + data.session_id;
+}
+</script>
+{{end}}

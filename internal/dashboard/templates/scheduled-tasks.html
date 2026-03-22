@@ -1,0 +1,408 @@
+{{define "scheduled-tasks.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "scheduled-tasks.content"}}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">定时任务</h1>
+        <p class="page-subtitle">管理 Agent 定时任务，支持 Cron 表达式配置</p>
+    </div>
+    <button class="btn btn-primary" onclick="showCreateTaskModal()">
+        <svg class="btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        创建任务
+    </button>
+</div>
+
+<div class="card-grid">
+    {{if .Tasks}}
+        {{range .Tasks}}
+        <div class="task-card card" data-task-id="{{.ID}}">
+            <div class="card-header">
+                <div class="task-status {{if .Enabled}}enabled{{else}}disabled{{end}}">
+                    <span class="status-dot"></span>
+                    {{if .Enabled}}运行中{{else}}已暂停{{end}}
+                </div>
+                <div class="task-actions">
+                    <button class="btn-icon" onclick="editTask({{.ID}})" title="编辑">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                    <button class="btn-icon" onclick="toggleTask({{.ID}}, {{.Enabled}})" title="{{if .Enabled}}暂停{{else}}启用{{end}}">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    </button>
+                    <button class="btn-icon btn-danger" onclick="deleteTask({{.ID}})" title="删除">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <h3 class="task-name">{{.Name}}</h3>
+                <p class="task-description">{{.Description}}</p>
+                <div class="task-meta">
+                    <div class="meta-item">
+                        <span class="meta-label">Cron 表达式:</span>
+                        <code class="cron-expr">{{.CronExpr}}</code>
+                    </div>
+                    <div class="meta-item">
+                        <span class="meta-label">下次执行:</span>
+                        <span class="meta-value">{{if .NextRunAt}}{{.NextRunAt.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="meta-label">上次执行:</span>
+                        <span class="meta-value">{{if .LastRunAt}}{{.LastRunAt.Format "2006-01-02 15:04:05"}}{{else}}从未{{end}}</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="meta-label">统计:</span>
+                        <span class="meta-value">成功 {{.SuccessRuns}} / 失败 {{.FailedRuns}} / 总计 {{.TotalRuns}}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {{end}}
+    {{else}}
+        <div class="empty-state">
+            <svg class="empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <p>暂无定时任务</p>
+            <button class="btn btn-primary" onclick="showCreateTaskModal()">创建第一个任务</button>
+        </div>
+    {{end}}
+</div>
+
+<!-- Create/Edit Modal -->
+<div id="taskModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 id="modalTitle">创建定时任务</h2>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <form id="taskForm" onsubmit="saveTask(event)">
+            <input type="hidden" id="taskId">
+            <div class="form-group">
+                <label for="taskName">任务名称</label>
+                <input type="text" id="taskName" required placeholder="例如：每日数据备份">
+            </div>
+            <div class="form-group">
+                <label for="taskDescription">任务描述</label>
+                <textarea id="taskDescription" rows="2" placeholder="描述任务用途"></textarea>
+            </div>
+            <div class="form-group">
+                <label for="taskAgent">选择 Agent</label>
+                <select id="taskAgent" required>
+                    <option value="">请选择 Agent</option>
+                    {{range .Agents}}
+                    <option value="{{.ID}}">{{.Name}}</option>
+                    {{end}}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="taskCron">Cron 表达式</label>
+                <input type="text" id="taskCron" required placeholder="分 时 日 月 周" value="0 9 * * *">
+                <small>格式：分 时 日 月 周（例如：0 9 * * * 表示每天 9:00）</small>
+            </div>
+            <div class="form-group">
+                <label for="taskInput">输入消息</label>
+                <textarea id="taskInput" rows="4" required placeholder="发送给 Agent 的消息内容"></textarea>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="taskEnabled" checked>
+                    启用任务
+                </label>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+.task-card {
+    transition: all 0.2s;
+}
+
+.task-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.task-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.task-status.enabled .status-dot {
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+}
+
+.task-status.disabled .status-dot {
+    background: var(--text-muted);
+}
+
+.task-name {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.task-description {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.task-meta {
+    display: grid;
+    gap: 12px;
+}
+
+.meta-item {
+    display: flex;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.meta-label {
+    color: var(--text-muted);
+    min-width: 80px;
+}
+
+.meta-value {
+    color: var(--text-secondary);
+}
+
+.cron-expr {
+    background: var(--bg-tertiary);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: 'Monaco', 'Consolas', monospace;
+    font-size: 12px;
+    color: var(--accent);
+}
+
+.task-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.8);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal.show {
+    display: flex;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 100%;
+    max-width: 600px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 24px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 28px;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--text-primary);
+}
+
+#taskForm {
+    padding: 24px;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    font-size: 14px;
+}
+
+.form-group input[type="text"],
+.form-group textarea,
+.form-group select {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.form-group input:focus,
+.form-group textarea:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.form-group small {
+    display: block;
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.modal-footer {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+    margin-top: 24px;
+}
+</style>
+
+<script>
+let editingTaskId = null;
+
+function showCreateTaskModal() {
+    document.getElementById('modalTitle').textContent = '创建定时任务';
+    document.getElementById('taskForm').reset();
+    document.getElementById('taskId').value = '';
+    document.getElementById('taskEnabled').checked = true;
+    editingTaskId = null;
+    document.getElementById('taskModal').classList.add('show');
+}
+
+function closeModal() {
+    document.getElementById('taskModal').classList.remove('show');
+}
+
+async function editTask(id) {
+    try {
+        const res = await fetch(`/api/scheduled-task?id=${id}`);
+        const task = await res.json();
+        
+        editingTaskId = id;
+        document.getElementById('modalTitle').textContent = '编辑定时任务';
+        document.getElementById('taskId').value = task.id;
+        document.getElementById('taskName').value = task.name;
+        document.getElementById('taskDescription').value = task.description || '';
+        document.getElementById('taskAgent').value = task.agent_id;
+        document.getElementById('taskCron').value = task.cron_expr;
+        document.getElementById('taskInput').value = task.input;
+        document.getElementById('taskEnabled').checked = task.enabled;
+        
+        document.getElementById('taskModal').classList.add('show');
+    } catch (err) {
+        alert('加载任务失败：' + err.message);
+    }
+}
+
+async function saveTask(event) {
+    event.preventDefault();
+    
+    const data = {
+        name: document.getElementById('taskName').value,
+        description: document.getElementById('taskDescription').value,
+        agent_id: parseInt(document.getElementById('taskAgent').value),
+        cron_expr: document.getElementById('taskCron').value,
+        input: document.getElementById('taskInput').value,
+        session_id: 0, // 默认为 0，表示创建新会话
+        enabled: document.getElementById('taskEnabled').checked
+    };
+    
+    try {
+        const url = editingTaskId ? `/api/scheduled-task?id=${editingTaskId}` : '/api/scheduled-tasks';
+        const method = editingTaskId ? 'PUT' : 'POST';
+        
+        const res = await fetch(url, {
+            method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        
+        if (!res.ok) throw new Error(await res.text());
+        
+        closeModal();
+        location.reload();
+    } catch (err) {
+        alert('保存失败：' + err.message);
+    }
+}
+
+async function toggleTask(id, enabled) {
+    try {
+        const res = await fetch(`/api/scheduled-task?id=${id}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: !enabled})
+        });
+        
+        if (!res.ok) throw new Error(await res.text());
+        
+        location.reload();
+    } catch (err) {
+        alert('操作失败：' + err.message);
+    }
+}
+
+async function deleteTask(id) {
+    if (!confirm('确定要删除这个任务吗？')) return;
+    
+    try {
+        const res = await fetch(`/api/scheduled-task?id=${id}`, {
+            method: 'DELETE'
+        });
+        
+        if (!res.ok) throw new Error(await res.text());
+        
+        location.reload();
+    } catch (err) {
+        alert('删除失败：' + err.message);
+    }
+}
+
+// Close modal on outside click
+document.getElementById('taskModal').addEventListener('click', (e) => {
+    if (e.target.id === 'taskModal') {
+        closeModal();
+    }
+});
+</script>
+{{end}}
