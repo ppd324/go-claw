@@ -4,8 +4,6 @@
 *.so
 *.db
 *.dylib
-go-claw
-
 .claude/
 
 # Test binary
