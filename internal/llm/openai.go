@@ -13,9 +13,10 @@ import (
 )
 
 type OpenAIProvider struct {
-	client *http.Client
-	apiKey string
-	model  string
+	client  *http.Client
+	apiKey  string
+	model   string
+	baseUrl string
 }
 
 func NewOpenAIProvider(cfg *config.Config) (*OpenAIProvider, error) {
@@ -25,9 +26,10 @@ func NewOpenAIProvider(cfg *config.Config) (*OpenAIProvider, error) {
 	}
 
 	return &OpenAIProvider{
-		client: &http.Client{Timeout: cfg.LLMProvider.Timeout},
-		apiKey: apiKey,
-		model:  cfg.LLMProvider.Model,
+		client:  &http.Client{Timeout: cfg.LLMProvider.Timeout},
+		apiKey:  apiKey,
+		baseUrl: cfg.LLMProvider.BaseUrl,
+		model:   cfg.LLMProvider.Model,
 	}, nil
 }
 
@@ -67,7 +69,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	body, _ := json.Marshal(payload)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST",
-		"https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions", bytes.NewReader(body))
+		p.baseUrl+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +84,15 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(respBody))
 
 	var result struct {
 		Choices []struct {
 			Message struct {
-				Content    string `json:"content"`
-				ToolCalls  []struct {
-					Index    int `json:"index"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					Index    int    `json:"index"`
 					ID       string `json:"id"`
 					Type     string `json:"type"`
 					Function struct {
@@ -116,9 +120,9 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	toolCalls := make([]ToolCall, 0, len(result.Choices[0].Message.ToolCalls))
 	for _, tc := range result.Choices[0].Message.ToolCalls {
 		toolCalls = append(toolCalls, ToolCall{
-			Index:  tc.Index,
-			ID:     tc.ID,
-			Type:   tc.Type,
+			Index: tc.Index,
+			ID:    tc.ID,
+			Type:  tc.Type,
 			Function: struct {
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
@@ -130,11 +134,12 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	}
 
 	return &ChatResponse{
-		Content:      result.Choices[0].Message.Content,
-		InputTokens:  result.Usage.PromptTokens,
-		OutputTokens: result.Usage.CompletionTokens,
-		StopReason:   result.Choices[0].FinishReason,
-		ToolCalls:    toolCalls,
+		Content:       result.Choices[0].Message.Content,
+		ReasonContent: result.Choices[0].Message.ReasoningContent,
+		InputTokens:   result.Usage.PromptTokens,
+		OutputTokens:  result.Usage.CompletionTokens,
+		StopReason:    result.Choices[0].FinishReason,
+		ToolCalls:     toolCalls,
 	}, nil
 }
 

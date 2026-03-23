@@ -118,7 +118,6 @@ func (cm *ContextManager) BuildSystemPrompt() string {
 		sb.WriteString(heartbeat)
 		sb.WriteString("\n\n")
 	}
-	fmt.Println(sb.String())
 
 	return sb.String()
 }

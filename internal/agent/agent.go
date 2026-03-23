@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,22 @@ const (
 	defaultSystemPrompt = "You are a helpful AI assistant."
 	MaxToolIterations   = 20
 )
+
+const (
+	_colorReset  = "\033[0m"
+	_colorRed    = "\033[31m"
+	_colorGreen  = "\033[32m"
+	_colorYellow = "\033[33m"
+	_colorBlue   = "\033[34m"
+	_colorPurple = "\033[35m"
+	_colorCyan   = "\033[36m"
+	_colorGray   = "\033[90m"
+	_colorBold   = "\033[1m"
+)
+
+func printColored(color string, format string, args ...interface{}) {
+	fmt.Printf(color+format+_colorReset+"\n", args...)
+}
 
 type Tool struct {
 	Name        string `json:"name"`
@@ -61,6 +78,10 @@ type ExecuteRequest struct {
 	InputRole        string
 	Mode             ExecutionMode
 	SaveInputMessage bool // Whether to save user message to database (default: true)
+	SystemPrompt     string
+	//禁用工具
+	DisableTools []string
+	ContextEmpty bool
 }
 
 type ExecuteResult struct {
@@ -99,29 +120,38 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 	ctx = context.WithValue(ctx, "session_id", req.SessionID)
 	ctx = context.WithValue(ctx, "agent_id", a.ID)
 
+	printColored(_colorCyan, "╔═══════════════════════════════════════════════════════════╗")
+	printColored(_colorCyan, "║          AGENT EXECUTION STARTING                         ║")
+	printColored(_colorCyan, "╚═══════════════════════════════════════════════════════════╝")
+	printColored(_colorBold, "Agent: %s (ID: %d) | Session: %s", a.Name, a.ID, req.SessionID)
+
 	provider := a.manager.GetProvider()
 	if provider == nil {
 		err := fmt.Errorf("no llm provider configured")
 		a.markRunError(req, err)
 		return nil, err
 	}
-
-	history, err := a.getConversationHistory(req.SessionID)
-	if err != nil {
-		a.markRunError(req, err)
-		return nil, err
-	}
-
-	messages := make([]llm.Message, 0, len(history)+1)
-	for _, msg := range history {
-		role := msg.Role
-		if role == "" {
-			role = "user"
+	messages := make([]llm.Message, 0)
+	if !req.ContextEmpty {
+		history, err := a.getConversationHistory(req.SessionID)
+		if err != nil {
+			a.markRunError(req, err)
+			return nil, err
 		}
-		messages = append(messages, llm.Message{
-			Role:    role,
-			Content: msg.Content,
-		})
+
+		printColored(_colorGray, "Loaded %d historical messages", len(history))
+
+		messages = make([]llm.Message, 0, len(history)+1)
+		for _, msg := range history {
+			role := msg.Role
+			if role == "" {
+				role = "user"
+			}
+			messages = append(messages, llm.Message{
+				Role:    role,
+				Content: msg.Content,
+			})
+		}
 	}
 	if req.InputRole == "" {
 		req.InputRole = "user"
@@ -131,24 +161,41 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		Content: req.Input,
 	})
 
-	systemPrompt := a.systemPrompt()
+	var systemPrompt string
+	if req.SystemPrompt != "" {
+		systemPrompt = req.SystemPrompt
+	} else {
+		systemPrompt = a.systemPrompt()
+	}
+
 	model := a.getModel()
 	toolList := a.toolRegistry.List()
+	if len(req.DisableTools) > 0 {
+		toolList = slices.DeleteFunc(toolList, func(tool *tools.ToolInfo) bool {
+			return slices.Contains(req.DisableTools, tool.Name)
+		})
+	}
 
 	result := &ExecuteResult{}
 
+	printColored(_colorBold, "Starting execution loop (max iterations: %d)", MaxToolIterations)
+
 	for iteration := 0; iteration < MaxToolIterations; iteration++ {
+		printColored(_colorPurple, "┌─────────────────────────────────────────────────────┐")
+		printColored(_colorPurple, "│ Iteration %d/%d                                      │", iteration+1, MaxToolIterations)
+		printColored(_colorPurple, "└─────────────────────────────────────────────────────┘")
+
 		chatReq := &llm.ChatRequest{
 			Model:        model,
 			SystemPrompt: systemPrompt,
 			Messages:     messages,
 			MaxTokens:    a.manager.cfg.LLMProvider.MaxTokens,
 		}
-
 		if len(toolList) > 0 {
 			chatReq.Tools = toolList
 		}
 
+		printColored(_colorBlue, "Calling model API...")
 		resp, err := provider.Chat(ctx, chatReq)
 		if err != nil {
 			a.markRunError(req, err)
@@ -158,21 +205,40 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		result.InputTokens += resp.InputTokens
 		result.OutputTokens += resp.OutputTokens
 
+		printColored(_colorGreen, "Model response received | Input tokens: %d | Output tokens: %d", resp.InputTokens, resp.OutputTokens)
+
 		if iteration == 0 {
 			result.Content = resp.Content
 		}
 
+		// Print model thinking content
+		if resp.Content != "" {
+			printColored(_colorYellow, "┌─────────────────────────────────────────────────────┐")
+			printColored(_colorYellow, "│ 🤔 MODEL THINKING:                                  │")
+			printColored(_colorYellow, "└─────────────────────────────────────────────────────┘")
+			printColored(_colorGray, "%s", resp.ReasonContent)
+		}
+
 		if len(resp.ToolCalls) == 0 {
+			printColored(_colorGreen, "✓ No tool calls, execution completed")
 			if iteration > 0 {
 				result.Content = resp.Content
 			}
 			break
 		}
 
+		printColored(_colorBold, "Found %d tool call(s), executing...", len(resp.ToolCalls))
+
 		messages = append(messages, llm.Message{
 			Role:    "assistant",
 			Content: resp.Content,
 		})
+
+		// Print tool call details
+		for i, tc := range resp.ToolCalls {
+			printColored(_colorCyan, "  Tool %d: %s", i+1, tc.Function.Name)
+			printColored(_colorGray, "    Arguments: %s", tc.Function.Arguments)
+		}
 
 		toolResults, err := a.executeToolCalls(ctx, resp.ToolCalls)
 		if err != nil {
@@ -181,6 +247,23 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		}
 
 		result.ToolCalls = append(result.ToolCalls, toolResults...)
+
+		// Print tool execution results
+		printColored(_colorBold, "Tool execution results:")
+		for i, tr := range toolResults {
+			status := _colorGreen + "✓ SUCCESS" + _colorReset
+			if !tr.Success {
+				status = _colorRed + "✗ FAILED" + _colorReset
+			}
+			printColored(_colorCyan, "  Tool %d: %s - %s", i+1, tr.ToolName, status)
+			if tr.Output != "" {
+				output := tr.Output
+				if len(output) > 200 {
+					output = output[:200] + "..."
+				}
+				printColored(_colorGray, "    Output: %s", output)
+			}
+		}
 
 		for _, tc := range resp.ToolCalls {
 			for _, tr := range toolResults {
@@ -194,10 +277,17 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 				}
 			}
 		}
+
+		printColored(_colorPurple, "Continuing to next iteration...\n")
 	}
 
+	printColored(_colorCyan, "╔═══════════════════════════════════════════════════════════╗")
+	printColored(_colorCyan, "║          AGENT EXECUTION COMPLETED                        ║")
+	printColored(_colorCyan, "╚═══════════════════════════════════════════════════════════╝")
+	printColored(_colorGreen, "Total tokens - Input: %d | Output: %d | Tool calls: %d", result.InputTokens, result.OutputTokens, len(result.ToolCalls))
+
 	// Save user message and assistant response
-	// Default behavior: save messages (when SaveMessage is not explicitly set to false)
+	// Default behavior: save messages (when SaveInputMessage is not explicitly set to false)
 	if err := a.saveMessages(req.SessionID, req.Input, result.Content, req.SaveInputMessage); err != nil {
 		slog.Warn("failed to save messages", "session_id", req.SessionID, "error", err)
 	}
@@ -209,7 +299,7 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		}
 	}
 
-	a.markRunSuccess(req, result, provider.GetName(), model, len(history))
+	a.markRunSuccess(req, result, provider.GetName(), model, len(messages))
 	return result, nil
 }
 
@@ -217,6 +307,11 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []llm.ToolCall) 
 	results := make([]ToolCallResult, 0, len(toolCalls))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+
+	printColored(_colorBold, "┌─────────────────────────────────────────────────────┐")
+	printColored(_colorBold, "│ EXECUTING TOOL CALLS                                │")
+	printColored(_colorBold, "└─────────────────────────────────────────────────────┘")
+
 	for _, tc := range toolCalls {
 		result := ToolCallResult{
 			ToolName: tc.Function.Name,
@@ -230,18 +325,31 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []llm.ToolCall) 
 				results = append(results, result)
 				mu.Unlock()
 			}()
+
+			printColored(_colorCyan, "  → Invoking tool: %s", result.ToolName)
+
 			tool, ok := a.toolRegistry.Get(tc.Function.Name)
 			if !ok {
-				result.Output = fmt.Sprintf("tool %s not found", tc.Function.Name)
+				printColored(_colorRed, "  ✗ Tool not found: %s", result.ToolName)
+				result.Output = fmt.Sprintf("tool %s not found", result.ToolName)
 				result.Success = false
 				return
 			}
 
+			printColored(_colorGray, "    Input: %s", result.Input)
+
 			toolResult, err := tool.Invoke(ctx, json.RawMessage(tc.Function.Arguments))
 			if err != nil {
+				printColored(_colorRed, "  ✗ Tool execution failed: %v", err)
 				result.Output = fmt.Sprintf("error: %v", err)
 				result.Success = false
 			} else {
+				printColored(_colorGreen, "  ✓ Tool executed successfully")
+				output := toolResult.Text
+				if len(output) > 150 {
+					output = output[:150] + "..."
+				}
+				printColored(_colorGray, "    Output: %s", output)
 				result.Output = toolResult.Text
 				result.Success = true
 			}

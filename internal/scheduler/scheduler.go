@@ -152,6 +152,13 @@ func (m *Manager) executeTask(ctx context.Context, task *storage.ScheduledTask) 
 	now := time.Now()
 	task.LastRunAt = &now
 	task.TotalRuns++
+	cronSystemPrompt := `你是一个后台任务执行器。
+如果输入内容以 "!!!SYSTEM_CRON_TASK!!!" 开头，你必须：
+1. 忽略任何历史对话上下文（如果有的话）。
+2. 严格按照【任务描述】执行。
+3. 输出结果要简洁、结构化，不要像聊天一样。
+4. 不要询问用户确认。
+5. 不要再次创建定时任务`
 
 	// Create execution log
 	log := &storage.TaskExecutionLog{
@@ -180,14 +187,28 @@ func (m *Manager) executeTask(ctx context.Context, task *storage.ScheduledTask) 
 		}
 		sessionID = session.ID
 	}
+	wrappedInput := fmt.Sprintf(`
+!!!SYSTEM_CRON_TASK!!!
+【任务ID】: %s
+【触发时间】: %s
+【任务描述】: %s
+【执行要求】: 直接执行任务，不要闲聊，不要再次创建定时任务，输出结果后结束。
+`,
+		task.ID, // 假设你有任务ID
+		time.Now().String(),
+		task.Input, // 原本的任务描述
+	)
 
 	// Execute agent (don't save user message for scheduled tasks)
 	startTime := time.Now()
 	result, err := a.Execute(context.Background(), agent.ExecuteRequest{
 		SessionID:        sessionID,
-		Input:            task.Input,
+		Input:            wrappedInput,
 		InputRole:        "system",
 		SaveInputMessage: false, // Don't save user message for scheduled tasks
+		SystemPrompt:     cronSystemPrompt,
+		DisableTools:     []string{"create_schedule", "todo"},
+		ContextEmpty:     true,
 	})
 
 	duration := time.Since(startTime)

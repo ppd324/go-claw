@@ -84,8 +84,8 @@ func (s *WebSocketServer) Start() error {
 
 // handleWebSocket handles WebSocket connections
 func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("=== WebSocket request received! ===")
-	slog.Info("websocket upgrade request received", "path", r.URL.Path)
+	// fmt.Println("=== WebSocket request received! ===")
+	// slog.Info("websocket upgrade request received", "path", r.URL.Path)
 
 	// Upgrade to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -96,8 +96,8 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	fmt.Println("=== WebSocket upgraded successfully! ===")
-	slog.Info("websocket upgraded successfully")
+	// fmt.Println("=== WebSocket upgraded successfully! ===")
+	// slog.Info("websocket upgraded successfully")
 
 	// Generate client ID
 	clientID := generateClientID()
@@ -116,9 +116,9 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 	s.mu.Unlock()
 	s.manager.register <- client
 
-	slog.Info("websocket client connected", "client_id", clientID, "total_clients", len(s.clients))
+	// slog.Info("websocket client connected", "client_id", clientID, "total_clients", len(s.clients))
 
-	fmt.Println("=== Starting readPump and writePump goroutines ===")
+	// fmt.Println("=== Starting readPump and writePump goroutines ===")
 
 	// Start goroutines
 	go s.writePump(client)
@@ -152,9 +152,9 @@ func (s *WebSocketServer) readPump(client *Client) {
 			break
 		}
 
-		fmt.Println("=== WebSocket message received! ===")
-		fmt.Println("Message content:", string(message))
-		slog.Info("websocket message received", "client_id", client.ID, "message", string(message))
+		// fmt.Println("=== WebSocket message received! ===")
+		// fmt.Println("Message content:", string(message))
+		// slog.Info("websocket message received", "client_id", client.ID, "message", string(message))
 
 		s.handleMessage(client, message)
 	}
@@ -245,15 +245,15 @@ func (s *WebSocketServer) handleAuth(client *Client, payload json.RawMessage) {
 	client.Platform = auth.Platform
 	client.PlatformChatID = auth.PlatformChatID
 
-	slog.Info("websocket client authenticated", "client_id", client.ID, "platform", client.Platform, "platform_chat_id", client.PlatformChatID)
+	// slog.Info("websocket client authenticated", "client_id", client.ID, "platform", client.Platform, "platform_chat_id", client.PlatformChatID)
 
 	// Send auth_ok response
 	authOkMsg := map[string]interface{}{
 		"client_id": client.ID,
 	}
-	slog.Info("sending auth_ok response", "client_id", client.ID)
+	// slog.Info("sending auth_ok response", "client_id", client.ID)
 	s.sendMessage(client, "auth_ok", authOkMsg)
-	slog.Info("auth_ok response sent", "client_id", client.ID)
+	// slog.Info("auth_ok response sent", "client_id", client.ID)
 }
 
 // handleChatMessage handles chat messages

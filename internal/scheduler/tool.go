@@ -12,13 +12,11 @@ import (
 	"go-claw/internal/tools"
 )
 
-// CreateScheduleTool implements the tool for creating scheduled jobs
 type CreateScheduleTool struct {
 	repo      *storage.Repository
 	scheduler *Manager
 }
 
-// NewCreateScheduleTool creates a new schedule tool
 func NewCreateScheduleTool(repo *storage.Repository, scheduler *Manager) *CreateScheduleTool {
 	return &CreateScheduleTool{
 		repo:      repo,
@@ -26,81 +24,88 @@ func NewCreateScheduleTool(repo *storage.Repository, scheduler *Manager) *Create
 	}
 }
 
-// Info returns tool information
 func (t *CreateScheduleTool) Info(ctx context.Context) (*tools.ToolInfo, error) {
 	return &tools.ToolInfo{
-		Name:        "create_schedule",
-		Description: "Create a scheduled job. Supports: 1) One-time reminder (kind='at'), 2) Recurring task (kind='every' or kind='cron'). Session target: 'main' (default), 'isolated', 'current', or 'session:xxx'. Payload: {kind: 'systemEvent'|'agentTurn', input: string}",
+		Name: "create_schedule",
+		Description: `Create a scheduled task. Choose ONE of the following modes:
+
+1. ONE-TIME TASK (runAt): Execute once at a specific time, auto-delete after completion.
+   - Relative time: "3m", "1h", "2 hours", "in 5 minutes"
+   - Absolute time: "2026-01-01 10:00", "tomorrow 9am", "18:30"
+
+2. CRON TASK (cron): Execute on a schedule using cron expression.
+   - 5-field format: "0 9 * * *" (every day at 9am)
+   - "*/30 * * * *" (every 30 minutes)
+
+3. INTERVAL TASK (interval): Execute at regular intervals.
+   - "30m", "1h", "2h", "1d"
+
+Examples:
+- {"runAt": "5m", "input": "remind me to take a break"} - remind in 5 minutes
+- {"cron": "0 9 * * *", "input": "daily standup reminder"} - every day at 9am
+- {"interval": "1h", "input": "hourly status check"} - every hour`,
 		Parameters: tools.ToolParameters{
 			Type: tools.Object,
 			Properties: map[string]tools.ToolParameter{
+				"runAt": {
+					Type:        tools.String,
+					Description: "One-time task: when to run. Supports relative time ('3m', '1h', 'in 5 minutes') or absolute time ('2026-01-01 10:00', 'tomorrow 9am'). Task will be deleted after execution.",
+				},
+				"cron": {
+					Type:        tools.String,
+					Description: "Cron expression for recurring tasks (5 fields: minute hour day month weekday). Example: '0 9 * * *' for daily at 9am.",
+				},
+				"interval": {
+					Type:        tools.String,
+					Description: "Interval for recurring tasks. Examples: '30m', '1h', '2h', '1d'.",
+				},
+				"input": {
+					Type:        tools.String,
+					Description: "The content/command to execute when the task triggers. This is required.",
+				},
 				"name": {
 					Type:        tools.String,
-					Description: "Job name",
-				},
-				"description": {
-					Type:        tools.String,
-					Description: "Job description",
-				},
-				"schedule": {
-					Type:        tools.Object,
-					Description: "Schedule config: {kind: 'at'|'every'|'cron', time?: string (for 'at'), interval?: string (for 'every'), cron?: string (for 'cron')}",
-				},
-				"sessionTarget": {
-					Type:        tools.String,
-					Description: "Session target: 'main', 'isolated', 'current', 'session:xxx'",
-					Default:     "main",
-				},
-				"payload": {
-					Type:        tools.Object,
-					Description: "Payload config: {kind: 'systemEvent'|'agentTurn', input: string}",
-				},
-				"deleteAfterRun": {
-					Type:        tools.Boolean,
-					Description: "Delete after successful run (for kind='at')",
-					Default:     true,
-				},
-				"enabled": {
-					Type:        tools.Boolean,
-					Description: "Enable immediately",
-					Default:     true,
+					Description: "Optional task name. Will be auto-generated if not provided.",
 				},
 			},
-			Required: []string{"name", "schedule", "payload"},
+			Required: []string{"input"},
 		},
 	}, nil
 }
 
-// CreateScheduleParams represents the parameters for creating a schedule
 type CreateScheduleParams struct {
-	Name          string         `json:"name"`
-	Description   string         `json:"description"`
-	Schedule      ScheduleConfig `json:"schedule"`
-	SessionTarget string         `json:"sessionTarget"`
-	Payload       PayloadConfig  `json:"payload"`
-	DeleteAfter   bool           `json:"deleteAfterRun"`
-	Enabled       bool           `json:"enabled"`
-}
-
-// ScheduleConfig represents schedule configuration
-type ScheduleConfig struct {
-	Kind     string `json:"kind"`
-	Time     string `json:"time"`
-	Interval string `json:"interval"`
+	Name     string `json:"name"`
+	RunAt    string `json:"runAt"`
 	Cron     string `json:"cron"`
+	Interval string `json:"interval"`
+	Input    string `json:"input"`
 }
 
-// PayloadConfig represents payload configuration
-type PayloadConfig struct {
-	Kind  string `json:"kind"`
-	Input string `json:"input"`
-}
-
-// Invoke executes the tool
 func (t *CreateScheduleTool) Invoke(ctx context.Context, params json.RawMessage, opt ...tools.Option) (*tools.ToolResult, error) {
 	var p CreateScheduleParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return &tools.ToolResult{Text: "Failed to parse parameters: " + err.Error()}, nil
+	}
+
+	if p.Input == "" {
+		return &tools.ToolResult{Text: "Error: 'input' is required."}, nil
+	}
+
+	modeCount := 0
+	if p.RunAt != "" {
+		modeCount++
+	}
+	if p.Cron != "" {
+		modeCount++
+	}
+	if p.Interval != "" {
+		modeCount++
+	}
+	if modeCount == 0 {
+		return &tools.ToolResult{Text: "Error: Must provide one of: 'runAt', 'cron', or 'interval'."}, nil
+	}
+	if modeCount > 1 {
+		return &tools.ToolResult{Text: "Error: Can only use one of: 'runAt', 'cron', or 'interval'."}, nil
 	}
 
 	agentID, ok := ctx.Value("agent_id").(uint)
@@ -108,127 +113,175 @@ func (t *CreateScheduleTool) Invoke(ctx context.Context, params json.RawMessage,
 		return &tools.ToolResult{Text: "Failed to get current agent ID"}, nil
 	}
 
-	// Get current session ID from context
 	sessionID, _ := ctx.Value("session_id").(uint)
 
 	task := &storage.ScheduledTask{
 		Name:          p.Name,
-		Description:   p.Description,
 		AgentID:       agentID,
-		SessionID:     sessionID, // Store the session ID for task execution
-		Kind:          p.Schedule.Kind,
-		SessionTarget: p.SessionTarget,
-		PayloadKind:   p.Payload.Kind,
-		Input:         p.Payload.Input,
-		DeleteAfter:   p.DeleteAfter,
-		Enabled:       p.Enabled,
+		SessionID:     sessionID,
+		SessionTarget: "main",
+		PayloadKind:   "systemEvent",
+		Input:         p.Input,
+		Enabled:       true,
 	}
 
-	if task.SessionTarget == "" {
-		task.SessionTarget = "main"
+	if task.Name == "" {
+		task.Name = fmt.Sprintf("Task-%d", time.Now().Unix())
 	}
 
-	if task.PayloadKind == "" {
-		if task.SessionTarget == "isolated" {
-			task.PayloadKind = "agentTurn"
-		} else {
-			task.PayloadKind = "systemEvent"
-		}
-	}
+	var nextRunStr string
+	var err error
 
-	switch p.Schedule.Kind {
-	case "at":
-		if p.Schedule.Time == "" {
-			return &tools.ToolResult{Text: "Time required for 'at' schedule"}, nil
-		}
-		scheduledTime, err := parseTime(p.Schedule.Time)
-		if err != nil {
-			return &tools.ToolResult{Text: fmt.Sprintf("Invalid time: %v", err)}, nil
-		}
-		task.ScheduledAt = &scheduledTime
-		task.NextRunAt = &scheduledTime
-		task.CronExpr = fmt.Sprintf("%d %d %d %d %d", scheduledTime.Minute(), scheduledTime.Hour(), scheduledTime.Day(), scheduledTime.Month(), int(scheduledTime.Weekday()))
+	switch {
+	case p.RunAt != "":
+		task.Kind = "at"
 		task.DeleteAfter = true
-	case "every":
-		if p.Schedule.Interval == "" {
-			return &tools.ToolResult{Text: "Interval required for 'every' schedule"}, nil
-		}
-		task.Interval = p.Schedule.Interval
-		cronExpr, err := intervalToCron(p.Schedule.Interval)
-		if err != nil {
-			return &tools.ToolResult{Text: fmt.Sprintf("Invalid interval: %v", err)}, nil
-		}
-		task.CronExpr = cronExpr
-	case "cron":
-		if p.Schedule.Cron == "" {
-			return &tools.ToolResult{Text: "Cron expression required for 'cron' schedule"}, nil
-		}
-		task.CronExpr = p.Schedule.Cron
-	default:
-		return &tools.ToolResult{Text: fmt.Sprintf("Invalid schedule kind: %s", p.Schedule.Kind)}, nil
+		nextRunStr, err = t.setupRunAtTask(task, p.RunAt)
+	case p.Cron != "":
+		task.Kind = "cron"
+		task.CronExpr = p.Cron
+		nextRunStr, err = t.setupCronTask(task)
+	case p.Interval != "":
+		task.Kind = "every"
+		task.Interval = p.Interval
+		nextRunStr, err = t.setupIntervalTask(task, p.Interval)
+	}
+
+	if err != nil {
+		return &tools.ToolResult{Text: err.Error()}, nil
 	}
 
 	if err := t.repo.CreateScheduledTask(task); err != nil {
-		return &tools.ToolResult{Text: fmt.Sprintf("Failed to create schedule: %v", err)}, nil
+		return &tools.ToolResult{Text: fmt.Sprintf("Failed to create task: %v", err)}, nil
 	}
 
-	// Add to scheduler if enabled
 	if task.Enabled {
 		if err := t.scheduler.AddTask(task); err != nil {
-			return &tools.ToolResult{Text: fmt.Sprintf("Schedule created but failed to start: %v", err)}, nil
+			return &tools.ToolResult{Text: fmt.Sprintf("Task created but failed to start: %v", err)}, nil
 		}
 	}
 
-	result := fmt.Sprintf("Schedule created: %s (ID: %d)\nKind: %s\nSession: %s\nPayload: %s\nNext: %s",
-		task.Name, task.ID, task.Kind, task.SessionTarget, task.PayloadKind, task.NextRunAt.Format("2006-01-02 15:04"))
-
-	if task.Kind == "at" {
-		result += fmt.Sprintf("\nTime: %s", task.ScheduledAt.Format("2006-01-02 15:04"))
-		if task.DeleteAfter {
-			result += "\n(Will delete after run)"
-		}
-	} else if task.Kind == "every" {
-		result += fmt.Sprintf("\nInterval: %s", task.Interval)
-	} else {
-		result += fmt.Sprintf("\nCron: %s", task.CronExpr)
+	modeDesc := ""
+	switch task.Kind {
+	case "at":
+		modeDesc = "One-time task"
+	case "cron":
+		modeDesc = "Cron task"
+	case "every":
+		modeDesc = "Interval task"
 	}
+
+	result := fmt.Sprintf("✅ Task created: **%s**\nType: %s\nNext run: %s\nContent: %s",
+		task.Name, modeDesc, nextRunStr, task.Input)
 
 	return &tools.ToolResult{Text: result}, nil
 }
 
+func (t *CreateScheduleTool) setupRunAtTask(task *storage.ScheduledTask, runAt string) (string, error) {
+	runTime, err := parseTime(runAt)
+	if err != nil {
+		return "", fmt.Errorf("invalid time '%s': %v", runAt, err)
+	}
+
+	if runTime.Before(time.Now()) {
+		return "", fmt.Errorf("scheduled time '%s' is in the past", runAt)
+	}
+
+	task.ScheduledAt = &runTime
+	task.NextRunAt = &runTime
+	task.CronExpr = fmt.Sprintf("%d %d %d %d %d",
+		runTime.Minute(), runTime.Hour(), runTime.Day(), runTime.Month(), int(runTime.Weekday()))
+
+	return runTime.Format("2006-01-02 15:04"), nil
+}
+
+func (t *CreateScheduleTool) setupCronTask(task *storage.ScheduledTask) (string, error) {
+	if err := validateCronExpr(task.CronExpr); err != nil {
+		return "", fmt.Errorf("invalid cron expression: %v", err)
+	}
+
+	nextRun, err := t.scheduler.GetNextRun(task.CronExpr)
+	if err != nil {
+		return "", fmt.Errorf("failed to calculate next run time: %v", err)
+	}
+
+	task.NextRunAt = &nextRun
+	return nextRun.Format("2006-01-02 15:04"), nil
+}
+
+func (t *CreateScheduleTool) setupIntervalTask(task *storage.ScheduledTask, interval string) (string, error) {
+	cronExpr, err := intervalToCron(interval)
+	if err != nil {
+		return "", err
+	}
+
+	task.CronExpr = cronExpr
+
+	nextRun, err := t.scheduler.GetNextRun(task.CronExpr)
+	if err != nil {
+		return "", fmt.Errorf("failed to calculate next run time: %v", err)
+	}
+
+	task.NextRunAt = &nextRun
+	return fmt.Sprintf("%s (next: %s)", interval, nextRun.Format("2006-01-02 15:04")), nil
+}
+
+func validateCronExpr(expr string) error {
+	parts := strings.Fields(expr)
+	if len(parts) != 5 {
+		return fmt.Errorf("cron expression must have 5 fields (minute hour day month weekday), got %d", len(parts))
+	}
+	return nil
+}
+
 func parseTime(timeStr string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
-		return t, nil
-	}
-	if t, err := time.Parse("2006-01-02T15:04:05", timeStr); err == nil {
-		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.Local), nil
-	}
-
-	if dur, ok := parseRelativeTime(timeStr); ok {
-		return time.Now().Add(dur), nil
-	}
-
+	timeStr = strings.TrimSpace(timeStr)
 	now := time.Now()
-	if t, err := time.Parse("15:04", timeStr); err == nil {
-		return time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location()), nil
-	}
-	if t, err := time.Parse("3pm", timeStr); err == nil {
-		return time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), 0, 0, 0, now.Location()), nil
-	}
-	if t, err := time.Parse("3:04pm", timeStr); err == nil {
-		return time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location()), nil
+
+	if dur, ok := parseDuration(timeStr); ok {
+		return now.Add(dur), nil
 	}
 
-	chineseTime := map[string]int{"凌晨": 0, "早上": 6, "上午": 9, "中午": 12, "下午": 13, "傍晚": 17, "晚上": 19, "深夜": 23}
-	for prefix, _ := range chineseTime {
-		if strings.HasPrefix(timeStr, prefix) {
-			timeStr = strings.TrimPrefix(timeStr, prefix)
-			if strings.HasSuffix(timeStr, "点") {
-				hourStr := strings.TrimSuffix(timeStr, "点")
-				if hour, err := strconv.Atoi(hourStr); err == nil {
-					return time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location()), nil
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006/01/02 15:04",
+		"01/02 15:04",
+		"2006-01-02",
+		"15:04",
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, timeStr); err == nil {
+			if format == "15:04" || format == "01/02 15:04" {
+				year := now.Year()
+				if t.Before(now) {
+					if format == "15:04" {
+						t = t.Add(24 * time.Hour)
+					} else {
+						year++
+					}
 				}
+				t = time.Date(year, t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
 			}
+			return t, nil
+		}
+	}
+
+	lowerStr := strings.ToLower(timeStr)
+	if strings.Contains(lowerStr, "tomorrow") {
+		tomorrow := now.AddDate(0, 0, 1)
+		timePart := strings.TrimSpace(strings.TrimPrefix(lowerStr, "tomorrow"))
+		if timePart == "" {
+			return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, now.Location()), nil
+		}
+		if t, err := time.Parse("15:04", timePart); err == nil {
+			return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), t.Hour(), t.Minute(), 0, 0, now.Location()), nil
+		}
+		if t, err := time.Parse("3pm", timePart); err == nil {
+			return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), t.Hour(), 0, 0, 0, now.Location()), nil
 		}
 	}
 
@@ -240,42 +293,66 @@ func parseTime(timeStr string) (time.Time, error) {
 		return t, nil
 	}
 
-	return time.Time{}, fmt.Errorf("unrecognized time: %s", timeStr)
+	return time.Time{}, fmt.Errorf("unrecognized time format: %s", timeStr)
 }
 
-func parseRelativeTime(timeStr string) (time.Duration, bool) {
-	timeStr = strings.ToLower(timeStr)
-	if strings.HasPrefix(timeStr, "in ") {
-		timeStr = strings.TrimPrefix(timeStr, "in ")
-		if strings.HasSuffix(timeStr, " minutes") || strings.HasSuffix(timeStr, " mins") || strings.HasSuffix(timeStr, " minute") {
-			minutes, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(timeStr, " minutes"), " mins"), " minute"))
-			return time.Duration(minutes) * time.Minute, true
+func parseDuration(s string) (time.Duration, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+
+	s = strings.TrimPrefix(s, "in ")
+	s = strings.TrimPrefix(s, "after ")
+
+	s = strings.ReplaceAll(s, "分钟", "m")
+	s = strings.ReplaceAll(s, "小时", "h")
+	s = strings.ReplaceAll(s, "天", "d")
+	s = strings.ReplaceAll(s, "seconds", "s")
+	s = strings.ReplaceAll(s, "second", "s")
+	s = strings.ReplaceAll(s, "minutes", "m")
+	s = strings.ReplaceAll(s, "minute", "m")
+	s = strings.ReplaceAll(s, "mins", "m")
+	s = strings.ReplaceAll(s, "min", "m")
+	s = strings.ReplaceAll(s, "hours", "h")
+	s = strings.ReplaceAll(s, "hour", "h")
+	s = strings.ReplaceAll(s, "days", "d")
+	s = strings.ReplaceAll(s, "day", "d")
+
+	s = strings.TrimSpace(s)
+
+	if dur, err := time.ParseDuration(s); err == nil {
+		return dur, true
+	}
+
+	if strings.HasSuffix(s, "d") {
+		numStr := strings.TrimSuffix(s, "d")
+		if num, err := strconv.Atoi(numStr); err == nil && num > 0 {
+			return time.Duration(num) * 24 * time.Hour, true
 		}
-		if strings.HasSuffix(timeStr, " hours") || strings.HasSuffix(timeStr, " hour") {
-			hours, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(timeStr, " hours"), " hour"))
-			return time.Duration(hours) * time.Hour, true
-		}
 	}
-	if strings.HasSuffix(timeStr, "分钟后") {
-		minutes, _ := strconv.Atoi(strings.TrimSuffix(timeStr, "分钟后"))
-		return time.Duration(minutes) * time.Minute, true
-	}
-	if strings.HasSuffix(timeStr, "小时后") {
-		hours, _ := strconv.Atoi(strings.TrimSuffix(timeStr, "小时后"))
-		return time.Duration(hours) * time.Hour, true
-	}
+
 	return 0, false
 }
 
 func intervalToCron(interval string) (string, error) {
-	if strings.HasSuffix(interval, "h") {
-		return "0 * * * *", nil
+	interval = strings.ToLower(strings.TrimSpace(interval))
+
+	if dur, ok := parseDuration(interval); ok {
+		totalMinutes := int(dur.Minutes())
+		if totalMinutes < 1 {
+			totalMinutes = 1
+		}
+		if totalMinutes < 60 {
+			return fmt.Sprintf("*/%d * * * *", totalMinutes), nil
+		}
+		if totalMinutes < 1440 {
+			hours := totalMinutes / 60
+			return fmt.Sprintf("0 */%d * * *", hours), nil
+		}
+		if totalMinutes == 1440 {
+			return "0 0 * * *", nil
+		}
+		days := totalMinutes / 1440
+		return fmt.Sprintf("0 0 */%d * *", days), nil
 	}
-	if strings.HasSuffix(interval, "d") {
-		return "0 0 * * *", nil
-	}
-	if strings.HasSuffix(interval, "m") {
-		return "* * * * *", nil
-	}
-	return "", fmt.Errorf("unsupported interval: %s", interval)
+
+	return "", fmt.Errorf("invalid interval format: %s (use '30m', '1h', '1d', etc.)", interval)
 }

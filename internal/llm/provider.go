@@ -32,11 +32,12 @@ type ToolCall struct {
 }
 
 type ChatResponse struct {
-	Content      string     `json:"content"`
-	InputTokens  int        `json:"input_tokens"`
-	OutputTokens int        `json:"output_tokens"`
-	StopReason   string     `json:"stop_reason"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	ReasonContent string     `json:"reason_content"`
+	Content       string     `json:"content"`
+	InputTokens   int        `json:"input_tokens"`
+	OutputTokens  int        `json:"output_tokens"`
+	StopReason    string     `json:"stop_reason"`
+	ToolCalls     []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Message struct {
