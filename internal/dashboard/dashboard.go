@@ -14,18 +14,17 @@ import (
 
 	"go-claw/internal/agent"
 	"go-claw/internal/config"
+	"go-claw/internal/notify"
 	"go-claw/internal/scheduler"
 	"go-claw/internal/storage"
 )
 
-// WebSocketNotifier interface for WebSocket broadcast
 type WebSocketNotifier interface {
 	BroadcastNewMessage(sessionID string, message map[string]interface{})
 }
 
 const dashboardUserPlatform = "dashboard"
 
-// Server handles dashboard web UI.
 type Server struct {
 	cfg          *config.Config
 	agentManager *agent.Manager
@@ -138,23 +137,26 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/task-logs", s.handleAPITaskLogs)
 }
 
-// StartScheduler starts the scheduler
+func (s *Server) SetNotifyRegistry(registry *notify.Registry) {
+	s.scheduler.SetNotifyRegistry(registry)
+}
+
 func (s *Server) StartScheduler() {
 	if s.scheduler != nil {
-		notifyFunc := func(taskID uint, taskName, sessionID, status, output string) {
-			if s.wsServer != nil {
-				payload := map[string]interface{}{
-					"task_id":    taskID,
-					"task_name":  taskName,
-					"session_id": sessionID,
-					"status":     status,
-					"output":     output,
-				}
-				s.wsServer.BroadcastNewMessage(sessionID, payload)
-				slog.Info("task notification sent", "task_id", taskID, "session_id", sessionID)
-			}
-		}
-		s.scheduler.SetNotifyFunc(notifyFunc)
+		// notifyFunc := func(taskID uint, taskName, sessionID, status, output string) {
+		// 	if s.wsServer != nil {
+		// 		payload := map[string]interface{}{
+		// 			"task_id":    taskID,
+		// 			"task_name":  taskName,
+		// 			"session_id": sessionID,
+		// 			"status":     status,
+		// 			"output":     output,
+		// 		}
+		// 		s.wsServer.BroadcastNewMessage(sessionID, payload)
+		// 		slog.Info("task notification sent", "task_id", taskID, "session_id", sessionID)
+		// 	}
+		// }
+		// s.scheduler.SetNotifyFunc(notifyFunc)
 		s.scheduler.Start()
 	}
 }

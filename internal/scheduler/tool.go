@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"go-claw/internal/notify"
 	"go-claw/internal/storage"
 	"go-claw/internal/tools"
 )
@@ -115,14 +116,18 @@ func (t *CreateScheduleTool) Invoke(ctx context.Context, params json.RawMessage,
 
 	sessionID, _ := ctx.Value("session_id").(uint)
 
+	platform, platformChatID := notify.GetPlatformFromContext(ctx)
+
 	task := &storage.ScheduledTask{
-		Name:          p.Name,
-		AgentID:       agentID,
-		SessionID:     sessionID,
-		SessionTarget: "main",
-		PayloadKind:   "systemEvent",
-		Input:         p.Input,
-		Enabled:       true,
+		Name:           p.Name,
+		AgentID:        agentID,
+		SessionID:      sessionID,
+		SessionTarget:  "main",
+		PayloadKind:    "systemEvent",
+		Input:          p.Input,
+		Enabled:        true,
+		Platform:       platform,
+		PlatformChatID: platformChatID,
 	}
 
 	if task.Name == "" {

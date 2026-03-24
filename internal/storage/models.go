@@ -231,6 +231,10 @@ type ScheduledTask struct {
 	// Session configuration
 	SessionTarget string `gorm:"size:100" json:"session_target"` // "main", "isolated", "current", "session:xxx"
 
+	// Platform notification (for pushing task results back to source platform)
+	Platform       string `gorm:"size:50" json:"platform"`        // "feishu", "telegram", "dashboard", etc.
+	PlatformChatID string `gorm:"size:255" json:"platform_chat_id"` // Chat ID to send notification to
+
 	// Payload configuration
 	PayloadKind string `gorm:"size:50;not null;default:'systemEvent'" json:"payload_kind"` // "systemEvent", "agentTurn"
 	Input       string `gorm:"type:text" json:"input"`

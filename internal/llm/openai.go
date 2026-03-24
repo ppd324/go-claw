@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"go-claw/internal/config"
 )
@@ -26,7 +27,7 @@ func NewOpenAIProvider(cfg *config.Config) (*OpenAIProvider, error) {
 	}
 
 	return &OpenAIProvider{
-		client:  &http.Client{Timeout: cfg.LLMProvider.Timeout},
+		client:  &http.Client{Timeout: cfg.LLMProvider.Timeout * time.Second},
 		apiKey:  apiKey,
 		baseUrl: cfg.LLMProvider.BaseUrl,
 		model:   cfg.LLMProvider.Model,

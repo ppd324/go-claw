@@ -8,33 +8,36 @@ import (
 	"time"
 
 	"go-claw/internal/agent"
+	"go-claw/internal/notify"
 	"go-claw/internal/storage"
 
 	"github.com/robfig/cron/v3"
 )
 
-// TaskNotifyFunc is a function type for sending task notifications
-// Args: taskID, taskName, sessionID, status, output
 type TaskNotifyFunc func(taskID uint, taskName, sessionID, status, output string)
 
-// Manager handles scheduled tasks
 type Manager struct {
-	cron         *cron.Cron
-	repo         *storage.Repository
-	agentManager *agent.Manager
-	notifyFn     TaskNotifyFunc
-	tasks        map[uint]cron.EntryID
-	mu           sync.RWMutex
+	cron           *cron.Cron
+	repo           *storage.Repository
+	agentManager   *agent.Manager
+	notifyFn       TaskNotifyFunc
+	notifyRegistry *notify.Registry
+	tasks          map[uint]cron.EntryID
+	mu             sync.RWMutex
 }
 
-// SetNotifyFunc sets the notification function for the manager
 func (m *Manager) SetNotifyFunc(fn TaskNotifyFunc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.notifyFn = fn
 }
 
-// NewManager creates a new scheduler manager
+func (m *Manager) SetNotifyRegistry(registry *notify.Registry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.notifyRegistry = registry
+}
+
 func NewManager(repo *storage.Repository, agentManager *agent.Manager) *Manager {
 	m := &Manager{
 		cron:         cron.New(),
@@ -259,11 +262,7 @@ func (m *Manager) executeTask(ctx context.Context, task *storage.ScheduledTask) 
 		"duration_ms", duration.Milliseconds(),
 		"output_length", len(result.Content))
 
-	// Send WebSocket notification if notify function is set
-	if m.notifyFn != nil {
-		sessionStrID := fmt.Sprintf("session_%d", task.SessionID)
-		m.notifyFn(task.ID, task.Name, sessionStrID, "success", result.Content)
-	}
+	m.sendNotification(task, "success", result.Content)
 }
 
 // handleTaskError handles task execution error
@@ -293,14 +292,24 @@ func (m *Manager) handleTaskError(task *storage.ScheduledTask, log *storage.Task
 		"task_id", task.ID,
 		"error", err)
 
-	// Send WebSocket notification if notify function is set
+	m.sendNotification(task, "failed", err.Error())
+}
+
+func (m *Manager) sendNotification(task *storage.ScheduledTask, status, output string) {
 	if m.notifyFn != nil {
 		sessionStrID := fmt.Sprintf("session_%d", task.SessionID)
-		m.notifyFn(task.ID, task.Name, sessionStrID, "failed", err.Error())
+		m.notifyFn(task.ID, task.Name, sessionStrID, status, output)
+	}
+
+	if m.notifyRegistry != nil && task.Platform != "" && task.PlatformChatID != "" {
+		ctx := context.Background()
+		// msg := fmt.Sprintf("⏰ 定时任务「%s」执行完成\n状态: %s\n结果:\n%s", task.Name, status, output)
+		if err := m.notifyRegistry.Notify(ctx, task.Platform, task.PlatformChatID, output); err != nil {
+			slog.Error("failed to send platform notification", "platform", task.Platform, "error", err)
+		}
 	}
 }
 
-// GetNextRun returns the next run time for a task
 func (m *Manager) GetNextRun(cronExpr string) (time.Time, error) {
 	schedule, err := cron.ParseStandard(cronExpr)
 	if err != nil {

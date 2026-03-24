@@ -12,6 +12,7 @@ import (
 	"go-claw/internal/config"
 	"go-claw/internal/dashboard"
 	"go-claw/internal/log"
+	"go-claw/internal/notify"
 	"go-claw/internal/platform/feishu"
 	"go-claw/internal/platform/telegram"
 	"go-claw/internal/server"
@@ -58,7 +59,8 @@ func main() {
 
 	logger.Info().Str("work_dir", cfg.WorkDir).Str("db_path", cfg.Database.Path).Msg("Work directory and database initialized")
 
-	// Initialize agent manager
+	notifyRegistry := notify.NewRegistry()
+
 	agentManager := agent.NewManager(cfg, repo, cfg.WorkDir)
 
 	// Initialize WebSocket server
@@ -88,11 +90,19 @@ func main() {
 		if err != nil {
 			logger.Error().Err(err).Msg("Failed to initialize Feishu bot")
 		} else {
+			notifyRegistry.Register(feishuBot)
 			go feishuBot.Start()
 		}
 	}
 
-	// Start scheduler (initialized within dashboard)
+	if telegramBot != nil {
+		notifyRegistry.Register(telegramBot)
+	}
+
+	dashboardNotifier := dashboard.NewDashboardNotifier(wsServer)
+	notifyRegistry.Register(dashboardNotifier)
+
+	dash.SetNotifyRegistry(notifyRegistry)
 	dash.StartScheduler()
 
 	// Start servers

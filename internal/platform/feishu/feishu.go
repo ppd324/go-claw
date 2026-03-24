@@ -2,323 +2,369 @@ package feishu
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"go-claw/internal/agent"
 	"go-claw/internal/config"
+	"go-claw/internal/notify"
 	"go-claw/internal/storage"
+
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
-// Message represents a parsed message from Feishu
-type Message struct {
-	MessageID   string
-	ChatID      string
-	ChatType    string
-	SenderID    string
-	SenderType  string
-	MessageType string
-	Content     string
-}
-
-// Bot represents a Feishu bot
 type Bot struct {
 	cfg          *config.Config
 	agentManager *agent.Manager
 	repo         *storage.Repository
-	client       *http.Client
+	client       *lark.Client
+	wsClient     *larkws.Client
+	wsCancel     context.CancelFunc
 	mu           sync.RWMutex
 	running      bool
-	verifyToken  string
-	signingKey   string
+	server       *http.Server
 }
 
-// Event types
-const (
-	EventTypeMessage       = "im.message"
-	EventTypeMessageCreate = "message_created"
-)
-
-// NewBot creates a new Feishu bot
 func NewBot(cfg *config.Config, agentManager *agent.Manager, repo *storage.Repository) (*Bot, error) {
 	if !cfg.Feishu.Enabled {
 		return nil, fmt.Errorf("feishu is not enabled")
 	}
 
+	client := lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret,
+		lark.WithReqTimeout(30*time.Second),
+	)
+
 	return &Bot{
 		cfg:          cfg,
 		agentManager: agentManager,
 		repo:         repo,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		verifyToken: cfg.Feishu.VerifyToken,
-		signingKey:  cfg.Feishu.SigningKey,
+		client:       client,
 	}, nil
 }
 
-// Start starts the Feishu bot webhook server
 func (b *Bot) Start() error {
 	b.mu.Lock()
 	b.running = true
 	b.mu.Unlock()
 
-	log.Println("Feishu bot starting webhook server...")
+	slog.Info("Feishu bot starting...")
 
-	addr := fmt.Sprintf("%s:%d", b.cfg.Server.Host, b.cfg.Server.Port+1)
+	if b.cfg.Feishu.WebhookURL != "" {
+		return b.startWebhookMode()
+	}
+
+	return b.startWebSocketMode()
+}
+
+func (b *Bot) startWebSocketMode() error {
+	slog.Info("Starting Feishu bot in WebSocket mode (long connection)")
+
+	eventHandler := dispatcher.NewEventDispatcher("", "").
+		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+			return b.handleP2MessageReceiveV1(ctx, event)
+		})
+
+	wsClient := larkws.NewClient(b.cfg.Feishu.AppID, b.cfg.Feishu.AppSecret,
+		larkws.WithEventHandler(eventHandler),
+		larkws.WithLogLevel(larkcore.LogLevelInfo),
+	)
+
+	b.wsClient = wsClient
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b.wsCancel = cancel
+
+	go func() {
+		if err := wsClient.Start(ctx); err != nil {
+			slog.Error("Feishu WebSocket client error", "error", err)
+		}
+	}()
+
+	slog.Info("Feishu bot started in WebSocket mode")
+	return nil
+}
+
+func (b *Bot) startWebhookMode() error {
+	slog.Info("Starting Feishu bot in Webhook mode")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/feishu", b.handleWebhook)
 
-	server := &http.Server{
+	addr := fmt.Sprintf("%s:%d", b.cfg.Server.Host, b.cfg.Server.Port+1)
+	b.server = &http.Server{
 		Addr:    addr,
 		Handler: mux,
 	}
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Feishu webhook server error: %v", err)
+		slog.Info("Feishu webhook server listening", "addr", addr)
+		if err := b.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("Feishu webhook server error", "error", err)
 		}
 	}()
 
-	log.Printf("Feishu webhook server listening on %s", addr)
 	return nil
 }
 
-// Stop stops the Feishu bot
-func (b *Bot) Stop() {
-	b.mu.Lock()
-	b.running = false
-	b.mu.Unlock()
-	log.Println("Feishu bot stopped")
-}
-
-// IsRunning returns whether the bot is running
-func (b *Bot) IsRunning() bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.running
-}
-
-// handleWebhook handles incoming Feishu webhooks
-func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	// Verify signature
-	if !b.verifySignature(r) {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
-	}
-
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Printf("Failed to read request body: %v", err)
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Parse challenge for verification
-	var challengeReq struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(body, &challengeReq); err == nil {
-		if challengeReq.Type == "url_verification" {
-			b.handleVerification(w, body)
-			return
-		}
-	}
-
-	// Parse event
-	var event struct {
-		Type    string `json:"type"`
-		Event   string `json:"event"`
-		MsgType string `json:"msg_type"`
-	}
-	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("Failed to parse event: %v", err)
-		return
-	}
-
-	// Handle message events
-	if event.Type == "event_callback" && event.Event == EventTypeMessageCreate {
-		b.handleMessage(w, body)
-		return
-	}
-
-	// Return success
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"code":0}`))
-}
-
-// handleVerification handles URL verification
-func (b *Bot) handleVerification(w http.ResponseWriter, body []byte) {
-	var req struct {
-		Challenge string `json:"challenge"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return
-	}
-
-	resp := map[string]string{
-		"challenge": req.Challenge,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-// handleMessage handles incoming messages
-func (b *Bot) handleMessage(w http.ResponseWriter, body []byte) {
-	var event struct {
-		Event struct {
-			Message struct {
-				MessageID string `json:"message_id"`
-				ChatID    string `json:"chat_id"`
-				ChatType  string `json:"chat_type"`
-				Sender    struct {
-					ID   string `json:"id"`
-					Type string `json:"type"`
-				} `json:"sender"`
-				MessageType string `json:"message_type"`
-				Content     string `json:"content"`
-			} `json:"message"`
-		} `json:"event"`
-	}
-
-	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("Failed to parse message event: %v", err)
-		w.WriteHeader(http.StatusOK)
-		return
+func (b *Bot) handleP2MessageReceiveV1(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+	if event.Event == nil {
+		return nil
 	}
 
 	msg := event.Event.Message
+	sender := event.Event.Sender
+	fmt.Println("lark:", msg)
 
-	// Skip bot messages
-	if msg.Sender.Type == "app" {
+	if sender == nil || sender.SenderType == nil || *sender.SenderType == "app" {
+		return nil
+	}
+
+	var text string
+	if msg != nil && msg.MessageType != nil && *msg.MessageType == "text" {
+		if msg.Content != nil {
+			var content struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(*msg.Content), &content); err == nil {
+				text = content.Text
+			}
+		}
+	} else if msg != nil && msg.MessageType != nil && *msg.MessageType == "post" {
+		if msg.Content != nil {
+			text = b.extractPostContent(*msg.Content)
+		}
+	}
+
+	if text == "" || msg == nil || msg.ChatId == nil {
+		return nil
+	}
+
+	senderOpenID := ""
+	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
+		senderOpenID = *sender.SenderId.OpenId
+	}
+
+	messageID := ""
+	if msg.MessageId != nil {
+		messageID = *msg.MessageId
+	}
+
+	chatID := *msg.ChatId
+	chatType := ""
+	if msg.ChatType != nil {
+		chatType = *msg.ChatType
+	}
+
+	go b.processMessage(chatID, senderOpenID, messageID, text, chatType)
+
+	return nil
+}
+
+func (b *Bot) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		slog.Error("Failed to read request body", "error", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var baseEvent struct {
+		Schema string `json:"schema"`
+		Header struct {
+			EventID    string `json:"event_id"`
+			EventType  string `json:"event_type"`
+			CreateTime string `json:"create_time"`
+			Token      string `json:"token"`
+			AppID      string `json:"app_id"`
+			TenantKey  string `json:"tenant_key"`
+		} `json:"header"`
+	}
+
+	if err := json.Unmarshal(body, &baseEvent); err != nil {
+		slog.Error("Failed to parse base event", "error", err)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Parse message content
-	var content struct {
-		Text string `json:"text"`
-	}
-	text := ""
-	if msg.MessageType == "text" {
-		if err := json.Unmarshal([]byte(msg.Content), &content); err != nil {
-			log.Printf("Failed to parse content: %v", err)
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		text = content.Text
+	if baseEvent.Header.EventType == "url_verification" || baseEvent.Schema == "" {
+		b.handleURLVerification(w, body)
+		return
 	}
 
-	// Create message struct
-	feishuMsg := Message{
-		MessageID:   msg.MessageID,
-		ChatID:      msg.ChatID,
-		ChatType:    msg.ChatType,
-		SenderID:    msg.Sender.ID,
-		SenderType:  msg.Sender.Type,
-		MessageType: msg.MessageType,
-		Content:     msg.Content,
+	if baseEvent.Header.EventType == "im.message.receive_v1" {
+		b.handleWebhookMessageEvent(r.Context(), body)
 	}
-
-	// Process message
-	go b.processMessage(feishuMsg, text)
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"code":0}`))
 }
 
-// processMessage processes the message through the agent
-func (b *Bot) processMessage(msg Message, text string) {
-	// Get or create user
-	platform := "feishu"
-	platformUserID := msg.SenderID
-
-	user, err := b.repo.GetOrCreateUser(platform, platformUserID, "", "")
-	if err != nil {
-		log.Printf("Failed to get/create user: %v", err)
+func (b *Bot) handleURLVerification(w http.ResponseWriter, body []byte) {
+	var req struct {
+		Challenge string `json:"challenge"`
+		Token     string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		slog.Error("Failed to parse URL verification", "error", err)
 		return
 	}
 
-	// Get or create session
-	session, err := b.getOrCreateSession(user, msg.ChatID)
-	if err != nil {
-		log.Printf("Failed to get/create session: %v", err)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"challenge": req.Challenge})
+}
+
+func (b *Bot) handleWebhookMessageEvent(ctx context.Context, body []byte) {
+	var event struct {
+		Sender struct {
+			SenderID struct {
+				UnionID string `json:"union_id"`
+				UserID  string `json:"user_id"`
+				OpenID  string `json:"open_id"`
+			} `json:"sender_id"`
+			SenderType string `json:"sender_type"`
+			TenantKey  string `json:"tenant_key"`
+		} `json:"sender"`
+		Message struct {
+			MessageID   string `json:"message_id"`
+			RootID      string `json:"root_id"`
+			ParentID    string `json:"parent_id"`
+			CreateTime  string `json:"create_time"`
+			ChatID      string `json:"chat_id"`
+			ChatType    string `json:"chat_type"`
+			MessageType string `json:"message_type"`
+			Content     string `json:"content"`
+			Mentions    []struct {
+				Key string `json:"key"`
+				ID  struct {
+					UnionID string `json:"union_id"`
+					UserID  string `json:"user_id"`
+					OpenID  string `json:"open_id"`
+				} `json:"id"`
+				Name      string `json:"name"`
+				TenantKey string `json:"tenant_key"`
+			} `json:"mentions"`
+		} `json:"message"`
+	}
+
+	if err := json.Unmarshal(body, &event); err != nil {
+		slog.Error("Failed to parse message event", "error", err)
 		return
 	}
 
-	// Save user message
+	msg := event.Message
+	sender := event.Sender
+
+	if sender.SenderType == "app" {
+		return
+	}
+
+	var text string
+	if msg.MessageType == "text" {
+		var content struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(msg.Content), &content); err == nil {
+			text = content.Text
+		}
+	} else if msg.MessageType == "post" {
+		text = b.extractPostContent(msg.Content)
+	}
+
+	if text == "" {
+		return
+	}
+
+	go b.processMessage(msg.ChatID, sender.SenderID.OpenID, msg.MessageID, text, msg.ChatType)
+}
+
+func (b *Bot) extractPostContent(content string) string {
+	var post struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(content), &post); err == nil {
+		return post.Title + "\n" + post.Content
+	}
+	return ""
+}
+
+func (b *Bot) processMessage(chatID, senderOpenID, messageID, text, chatType string) {
+	ctx := context.Background()
+	ctx = notify.WithPlatform(ctx, "feishu", chatID)
+
+	user, err := b.repo.GetOrCreateUser("feishu", senderOpenID, "", "")
+	if err != nil {
+		slog.Error("Failed to get/create user", "error", err)
+		return
+	}
+
+	session, err := b.getOrCreateSession(user, chatID)
+	if err != nil {
+		slog.Error("Failed to get/create session", "error", err)
+		return
+	}
+
 	userMsg := &storage.Message{
-		MessageID:         msg.MessageID,
+		MessageID:         messageID,
 		Content:           text,
 		Role:              "user",
 		SessionID:         session.ID,
-		PlatformMessageID: msg.MessageID,
+		PlatformMessageID: messageID,
 	}
 	if err := b.repo.CreateMessage(userMsg); err != nil {
-		log.Printf("Failed to save message: %v", err)
+		slog.Error("Failed to save message", "error", err)
 	}
 
-	// Get agent
 	agentInstance, err := b.agentManager.GetAgent(session.AgentID)
 	if err != nil {
-		log.Printf("Failed to get agent: %v", err)
+		slog.Error("Failed to get agent", "error", err)
 		return
 	}
 
-	// Process through agent
-	ctx := context.Background()
 	response, err := agentInstance.ProcessMessage(ctx, text, session.ID)
 	if err != nil {
-		log.Printf("Agent error: %v", err)
+		slog.Error("Agent error", "error", err)
 		response = fmt.Sprintf("Error: %v", err)
 	}
 
-	// Send response back to Feishu
-	if err := b.sendMessage(msg.ChatID, response); err != nil {
-		log.Printf("Failed to send response: %v", err)
+	if err := b.SendTextMessage(chatID, response); err != nil {
+		slog.Error("Failed to send response", "error", err)
 	}
 
-	// Save assistant message
 	assistantMsg := &storage.Message{
-		MessageID: fmt.Sprintf("resp_%d", time.Now().Unix()),
+		MessageID: fmt.Sprintf("resp_%d", time.Now().UnixNano()),
 		Content:   response,
 		Role:      "assistant",
 		SessionID: session.ID,
 	}
 	if err := b.repo.CreateMessage(assistantMsg); err != nil {
-		log.Printf("Failed to save response: %v", err)
+		slog.Error("Failed to save response", "error", err)
 	}
 }
 
-// getOrCreateSession gets or creates a session for the user
 func (b *Bot) getOrCreateSession(user *storage.User, chatID string) (*storage.Session, error) {
-	// Try to get active session
 	sessions, err := b.repo.GetSessionsByUser(user.ID)
 	if err == nil && len(sessions) > 0 {
-		for _, s := range sessions {
-			if s.Status == "active" && s.PlatformChatID == chatID {
-				return &s, nil
+		for i := range sessions {
+			if sessions[i].Status == "active" && sessions[i].PlatformChatID == chatID {
+				return &sessions[i], nil
 			}
 		}
 	}
 
-	// Get default agent
 	agents, err := b.agentManager.ListAgents()
 	if err != nil || len(agents) == 0 {
 		return nil, fmt.Errorf("no agents available")
 	}
 
-	// Create new session
 	session := &storage.Session{
 		SessionID:      fmt.Sprintf("feishu_%d", time.Now().UnixNano()),
 		Title:          "Feishu Chat",
@@ -336,89 +382,110 @@ func (b *Bot) getOrCreateSession(user *storage.User, chatID string) (*storage.Se
 	return session, nil
 }
 
-// verifySignature verifies the request signature
-func (b *Bot) verifySignature(r *http.Request) bool {
-	if b.signingKey == "" {
-		return true // Skip verification if no key
-	}
+func (b *Bot) SendTextMessage(chatID, text string) error {
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypePost).
+			Content(fmt.Sprintf(`{"zh_cn":{"title":"","content":[[{"tag":"text","text":%q}]]}}`, text)).
+			Build()).
+		Build()
 
-	signature := r.Header.Get("X-Lark-Signature")
-	timestamp := r.Header.Get("X-Lark-Timestamp")
-
-	if signature == "" || timestamp == "" {
-		return false
-	}
-
-	// Build signature string
-	stringToSign := timestamp + "\n" + b.signingKey
-
-	// HMAC-SHA256
-	h := hmac.New(sha256.New, []byte(b.signingKey))
-	h.Write([]byte(stringToSign))
-	sign := base64.StdEncoding.EncodeToString(h.Sum(nil))
-
-	return sign == signature
-}
-
-// sendMessage sends a message to Feishu
-func (b *Bot) sendMessage(chatID, text string) error {
-	apiURL := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id")
-
-	payload := map[string]interface{}{
-		"receive_id": chatID,
-		"msg_type":   "text",
-		"content":    map[string]string{"text": text},
-	}
-
-	body, err := json.Marshal(payload)
+	resp, err := b.client.Im.Message.Create(context.Background(), req)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send message: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+b.cfg.Feishu.AppAccessToken)
-
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to send message: %s", body)
+	if !resp.Success() {
+		return fmt.Errorf("failed to send message: %s", resp.Msg)
 	}
 
 	return nil
 }
 
-// SendMessage sends a message to a chat
+func (b *Bot) SendCardMessage(chatID, title, content string) error {
+	card := map[string]interface{}{
+		"config": map[string]interface{}{
+			"wide_screen_mode": true,
+		},
+		"elements": []map[string]interface{}{
+			{
+				"tag": "div",
+				"text": map[string]interface{}{
+					"tag":     "plain_text",
+					"content": content,
+				},
+			},
+		},
+	}
+
+	if title != "" {
+		card["header"] = map[string]interface{}{
+			"title": map[string]interface{}{
+				"tag":     "plain_text",
+				"content": title,
+			},
+		}
+	}
+
+	cardJSON, _ := json.Marshal(card)
+
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(string(cardJSON)).
+			Build()).
+		Build()
+
+	resp, err := b.client.Im.Message.Create(context.Background(), req)
+	if err != nil {
+		return fmt.Errorf("failed to send card message: %w", err)
+	}
+
+	if !resp.Success() {
+		return fmt.Errorf("failed to send card message: %s", resp.Msg)
+	}
+
+	return nil
+}
+
+func (b *Bot) Stop() {
+	b.mu.Lock()
+	b.running = false
+	b.mu.Unlock()
+
+	if b.wsCancel != nil {
+		b.wsCancel()
+	}
+
+	if b.server != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		b.server.Shutdown(ctx)
+	}
+
+	slog.Info("Feishu bot stopped")
+}
+
+func (b *Bot) IsRunning() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.running
+}
+
 func (b *Bot) SendMessage(chatID, text string) error {
-	return b.sendMessage(chatID, text)
+	return b.SendTextMessage(chatID, text)
 }
 
-// RegisterWebhook registers the webhook with Feishu
-func (b *Bot) RegisterWebhook(webhookURL string) error {
-	apiURL := "https://open.feishu.cn/open-apis/bot/v3/hook"
-
-	payload := map[string]interface{}{
-		"url": webhookURL,
-	}
-
-	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", apiURL, strings.NewReader(string(body)))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	return nil
+func (b *Bot) SendMessageWithContext(ctx context.Context, chatID, text string) error {
+	return b.SendTextMessage(chatID, text)
 }
+
+func (b *Bot) GetPlatform() string {
+	return "feishu"
+}
+
+var _ notify.Notifier = (*Bot)(nil)
