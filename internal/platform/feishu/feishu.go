@@ -323,9 +323,12 @@ func (b *Bot) processMessage(chatID, senderOpenID, messageID, text, chatType str
 		slog.Error("Failed to save message", "error", err)
 	}
 
+	reactionID := b.AddTypingReaction(messageID)
+
 	agentInstance, err := b.agentManager.GetAgent(session.AgentID)
 	if err != nil {
 		slog.Error("Failed to get agent", "error", err)
+		b.RemoveTypingReaction(messageID, reactionID)
 		return
 	}
 
@@ -334,6 +337,8 @@ func (b *Bot) processMessage(chatID, senderOpenID, messageID, text, chatType str
 		slog.Error("Agent error", "error", err)
 		response = fmt.Sprintf("Error: %v", err)
 	}
+
+	b.RemoveTypingReaction(messageID, reactionID)
 
 	if err := b.SendTextMessage(chatID, response); err != nil {
 		slog.Error("Failed to send response", "error", err)
@@ -474,6 +479,56 @@ func (b *Bot) IsRunning() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.running
+}
+
+func (b *Bot) AddTypingReaction(messageID string) string {
+	ctx := context.Background()
+	req := larkim.NewCreateMessageReactionReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+			ReactionType(&larkim.Emoji{
+				EmojiType: larkcore.StringPtr("Typing"),
+			}).
+			Build()).
+		Build()
+
+	resp, err := b.client.Im.MessageReaction.Create(ctx, req)
+	if err != nil {
+		slog.Warn("Failed to add typing reaction", "error", err)
+		return ""
+	}
+
+	if !resp.Success() {
+		slog.Warn("Failed to add typing reaction", "msg", resp.Msg)
+		return ""
+	}
+
+	if resp.Data != nil && resp.Data.ReactionId != nil {
+		return *resp.Data.ReactionId
+	}
+	return ""
+}
+
+func (b *Bot) RemoveTypingReaction(messageID, reactionID string) {
+	if reactionID == "" {
+		return
+	}
+
+	ctx := context.Background()
+	req := larkim.NewDeleteMessageReactionReqBuilder().
+		MessageId(messageID).
+		ReactionId(reactionID).
+		Build()
+
+	resp, err := b.client.Im.MessageReaction.Delete(ctx, req)
+	if err != nil {
+		slog.Warn("Failed to remove typing reaction", "error", err)
+		return
+	}
+
+	if !resp.Success() {
+		slog.Warn("Failed to remove typing reaction", "msg", resp.Msg)
+	}
 }
 
 func (b *Bot) SendMessage(chatID, text string) error {
