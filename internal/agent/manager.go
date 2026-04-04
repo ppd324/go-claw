@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 
 	"go-claw/internal/config"
 	"go-claw/internal/llm"
+	"go-claw/internal/skills"
 	"go-claw/internal/storage"
 	"go-claw/internal/tools"
 )
@@ -21,6 +23,7 @@ type Manager struct {
 	toolRegistry   *tools.ToolRegistry
 	contextManager *ContextManager
 	sessionManager *SessionManager
+	skillManager   *skills.Manager
 	workspace      string
 }
 
@@ -35,7 +38,21 @@ func NewManager(cfg *config.Config, repo *storage.Repository, baseDir string) *M
 
 	EnsureWorkspace(workspace)
 
-	cm := NewContextManager(workspace)
+	skillsDir := cfg.Skills.Directory
+	if skillsDir == "" {
+		skillsDir = workspace + "/skills"
+	}
+
+	if !filepath.IsAbs(skillsDir) {
+		skillsDir = filepath.Join(workspace, skillsDir)
+	}
+
+	skillMgr := skills.NewManager(skillsDir)
+	if err := skillMgr.Load(); err != nil {
+		slog.Warn("Failed to load skills", "error", err)
+	}
+
+	cm := NewContextManagerWithSkills(workspace, skillMgr)
 	cm.Load()
 
 	sm := NewSessionManager(repo)
@@ -47,10 +64,16 @@ func NewManager(cfg *config.Config, repo *storage.Repository, baseDir string) *M
 		toolRegistry:   nil,
 		contextManager: cm,
 		sessionManager: sm,
+		skillManager:   skillMgr,
 		workspace:      workspace,
 	}
 
 	defaultRegistry := tools.NewDefaultToolRegistry(baseDir)
+	defaultRegistry.Register(tools.NewCreateSkillTool(skillMgr))
+	defaultRegistry.Register(tools.NewListSkillsTool(skillMgr))
+	defaultRegistry.Register(tools.NewGetSkillTool(skillMgr))
+	defaultRegistry.Register(tools.NewUpdateSkillTool(skillMgr))
+	defaultRegistry.Register(tools.NewDeleteSkillTool(skillMgr))
 	m.toolRegistry = defaultRegistry.ToolRegistry
 
 	if p, err := llm.NewOpenAIProvider(cfg); err == nil {
@@ -159,6 +182,10 @@ func (m *Manager) GetSessionManager() *SessionManager {
 	return m.sessionManager
 }
 
+func (m *Manager) GetSkillManager() *skills.Manager {
+	return m.skillManager
+}
+
 func (m *Manager) GetWorkspace() string {
 	return m.workspace
 }
@@ -238,6 +265,11 @@ func (m *Manager) GetStats() map[string]interface{} {
 		}
 	}
 
+	skillCount := 0
+	if m.skillManager != nil {
+		skillCount = len(m.skillManager.ListEnabled())
+	}
+
 	return map[string]interface{}{
 		"total_agents":  len(m.agents),
 		"active_agents": activeCount,
@@ -249,6 +281,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 			}
 			return ""
 		}(),
+		"skills_count": skillCount,
 	}
 }
 

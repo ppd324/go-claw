@@ -1,0 +1,479 @@
+{{define "skills.html"}}{{template "layout.html" .}}{{end}}
+
+{{define "skills.content"}}
+<div class="page-header">
+    <div>
+        <h1 class="page-title">技能管理</h1>
+        <p class="page-subtitle">管理和创建 AI 技能，通过斜杠命令触发执行</p>
+    </div>
+    <button class="btn btn-primary" onclick="showCreateSkillModal()">
+        <svg class="btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        创建技能
+    </button>
+</div>
+
+<div id="skillsList" class="card-grid">
+    <div class="empty-state" id="emptyState">
+        <svg class="empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <p>暂无技能</p>
+        <button class="btn btn-primary" onclick="showCreateSkillModal()">创建第一个技能</button>
+    </div>
+</div>
+
+<div id="skillModal" class="modal">
+    <div class="modal-content modal-large">
+        <div class="modal-header">
+            <h2 id="modalTitle">创建技能</h2>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <form id="skillForm" onsubmit="saveSkill(event)">
+            <input type="hidden" id="skillCommand">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="skillName">技能名称 *</label>
+                    <input type="text" id="skillName" required placeholder="例如：deploy, review-pr">
+                </div>
+                <div class="form-group">
+                    <label for="skillCommandInput">触发命令</label>
+                    <input type="text" id="skillCommandInput" placeholder="例如：/deploy（留空自动生成）">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="skillCategory">分类</label>
+                    <input type="text" id="skillCategory" placeholder="例如：deployment, code-review">
+                </div>
+                <div class="form-group">
+                    <label for="skillTags">标签</label>
+                    <input type="text" id="skillTags" placeholder="多个标签用逗号分隔">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="skillDescription">描述 *</label>
+                <textarea id="skillDescription" rows="2" required placeholder="简要描述技能的功能"></textarea>
+            </div>
+            <div class="form-group">
+                <label for="skillInstructions">指令 *</label>
+                <textarea id="skillInstructions" rows="8" required placeholder="详细的执行指令，描述 AI 应该如何执行此技能"></textarea>
+            </div>
+            <div class="form-group">
+                <label for="skillTools">所需工具</label>
+                <input type="text" id="skillTools" placeholder="多个工具用逗号分隔，例如：execute_command, read_file">
+            </div>
+            <div class="form-group">
+                <label for="skillExamples">示例</label>
+                <textarea id="skillExamples" rows="3" placeholder="使用示例，每行一个"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div id="skillDetailModal" class="modal">
+    <div class="modal-content modal-large">
+        <div class="modal-header">
+            <h2 id="detailModalTitle">技能详情</h2>
+            <button class="modal-close" onclick="closeDetailModal()">&times;</button>
+        </div>
+        <div id="skillDetailContent" class="skill-detail-content">
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeDetailModal()">关闭</button>
+            <button type="button" class="btn btn-primary" id="editSkillBtn">编辑</button>
+        </div>
+    </div>
+</div>
+
+<style>
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 20px;
+}
+
+.skill-card {
+    transition: all 0.2s;
+    cursor: pointer;
+}
+
+.skill-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.skill-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.skill-name {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.skill-command {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'Monaco', 'Consolas', monospace;
+}
+
+.skill-description {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.skill-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.skill-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.skill-category {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--success);
+}
+
+.skill-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.skill-tools {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.skill-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.modal-large {
+    max-width: 800px;
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.skill-detail-content {
+    padding: 24px;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.detail-section {
+    margin-bottom: 20px;
+}
+
+.detail-section h3 {
+    font-size: 14px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+}
+
+.detail-section p {
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+}
+
+.detail-section code {
+    background: var(--bg-tertiary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 20px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.empty-icon {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+}
+
+.empty-state p {
+    margin-bottom: 20px;
+    font-size: 15px;
+}
+</style>
+
+<script>
+let skills = [];
+let editingSkillCommand = null;
+
+async function loadSkills() {
+    try {
+        const res = await fetch('/api/skills');
+        skills = await res.json();
+        renderSkills();
+    } catch (err) {
+        console.error('加载技能失败:', err);
+    }
+}
+
+function renderSkills() {
+    const container = document.getElementById('skillsList');
+    const emptyState = document.getElementById('emptyState');
+    
+    if (skills.length === 0) {
+        container.innerHTML = '';
+        container.appendChild(emptyState);
+        emptyState.style.display = 'flex';
+        return;
+    }
+    
+    emptyState.style.display = 'none';
+    
+    container.innerHTML = skills.map(skill => `
+        <div class="skill-card card" onclick="showSkillDetail('${skill.command}')">
+            <div class="skill-header">
+                <div class="skill-name">${escapeHtml(skill.name)}</div>
+                <span class="skill-command">${escapeHtml(skill.command)}</span>
+            </div>
+            <p class="skill-description">${escapeHtml(skill.description)}</p>
+            <div class="skill-meta">
+                ${skill.category ? `<span class="skill-tag skill-category">${escapeHtml(skill.category)}</span>` : ''}
+                ${(skill.tags || []).map(tag => `<span class="skill-tag">${escapeHtml(tag)}</span>`).join('')}
+            </div>
+            <div class="skill-footer">
+                <span class="skill-tools">${(skill.tools || []).length} 个工具</span>
+                <div class="skill-actions" onclick="event.stopPropagation()">
+                    <button class="btn-icon" onclick="editSkill('${skill.command}')" title="编辑">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                    <button class="btn-icon btn-danger" onclick="deleteSkill('${skill.command}')" title="删除">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function showCreateSkillModal() {
+    editingSkillCommand = null;
+    document.getElementById('modalTitle').textContent = '创建技能';
+    document.getElementById('skillForm').reset();
+    document.getElementById('skillModal').classList.add('active');
+}
+
+function closeModal() {
+    document.getElementById('skillModal').classList.remove('active');
+}
+
+async function editSkill(command) {
+    const skill = skills.find(s => s.command === command);
+    if (!skill) return;
+    
+    editingSkillCommand = command;
+    document.getElementById('modalTitle').textContent = '编辑技能';
+    document.getElementById('skillCommand').value = skill.command;
+    document.getElementById('skillName').value = skill.name;
+    document.getElementById('skillCommandInput').value = skill.command;
+    document.getElementById('skillCategory').value = skill.category || '';
+    document.getElementById('skillTags').value = (skill.tags || []).join(', ');
+    document.getElementById('skillDescription').value = skill.description || '';
+    document.getElementById('skillInstructions').value = skill.instructions || '';
+    document.getElementById('skillTools').value = (skill.tools || []).join(', ');
+    document.getElementById('skillExamples').value = (skill.examples || []).join('\n');
+    
+    document.getElementById('skillModal').classList.add('active');
+}
+
+async function saveSkill(event) {
+    event.preventDefault();
+    
+    const name = document.getElementById('skillName').value.trim();
+    const command = document.getElementById('skillCommandInput').value.trim() || '/' + name.toLowerCase().replace(/\s+/g, '-');
+    const description = document.getElementById('skillDescription').value.trim();
+    const instructions = document.getElementById('skillInstructions').value.trim();
+    
+    if (!name || !description || !instructions) {
+        alert('请填写必填字段');
+        return;
+    }
+    
+    const data = {
+        name,
+        command,
+        description,
+        instructions,
+        category: document.getElementById('skillCategory').value.trim(),
+        tags: document.getElementById('skillTags').value.split(',').map(t => t.trim()).filter(t => t),
+        tools: document.getElementById('skillTools').value.split(',').map(t => t.trim()).filter(t => t),
+        examples: document.getElementById('skillExamples').value.split('\n').map(e => e.trim()).filter(e => e)
+    };
+    
+    try {
+        const url = editingSkillCommand ? `/api/skill?command=${encodeURIComponent(editingSkillCommand)}` : '/api/skills';
+        const method = editingSkillCommand ? 'PUT' : 'POST';
+        
+        const res = await fetch(url, {
+            method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || '保存失败');
+        }
+        
+        closeModal();
+        loadSkills();
+    } catch (err) {
+        alert('保存失败：' + err.message);
+    }
+}
+
+async function deleteSkill(command) {
+    if (!confirm('确定要删除这个技能吗？')) return;
+    
+    try {
+        const res = await fetch(`/api/skill?command=${encodeURIComponent(command)}`, {
+            method: 'DELETE'
+        });
+        
+        if (!res.ok) throw new Error('删除失败');
+        
+        loadSkills();
+    } catch (err) {
+        alert('删除失败：' + err.message);
+    }
+}
+
+function showSkillDetail(command) {
+    const skill = skills.find(s => s.command === command);
+    if (!skill) return;
+    
+    document.getElementById('detailModalTitle').textContent = skill.name;
+    document.getElementById('editSkillBtn').onclick = () => {
+        closeDetailModal();
+        editSkill(command);
+    };
+    
+    let content = `
+        <div class="detail-section">
+            <h3>命令</h3>
+            <p><code>${escapeHtml(skill.command)}</code></p>
+        </div>
+        <div class="detail-section">
+            <h3>描述</h3>
+            <p>${escapeHtml(skill.description)}</p>
+        </div>
+    `;
+    
+    if (skill.category) {
+        content += `
+            <div class="detail-section">
+                <h3>分类</h3>
+                <p>${escapeHtml(skill.category)}</p>
+            </div>
+        `;
+    }
+    
+    if (skill.tags && skill.tags.length > 0) {
+        content += `
+            <div class="detail-section">
+                <h3>标签</h3>
+                <p>${skill.tags.map(t => `<span class="skill-tag">${escapeHtml(t)}</span>`).join(' ')}</p>
+            </div>
+        `;
+    }
+    
+    if (skill.tools && skill.tools.length > 0) {
+        content += `
+            <div class="detail-section">
+                <h3>所需工具</h3>
+                <p>${skill.tools.map(t => `<code>${escapeHtml(t)}</code>`).join(', ')}</p>
+            </div>
+        `;
+    }
+    
+    content += `
+        <div class="detail-section">
+            <h3>指令</h3>
+            <p>${escapeHtml(skill.instructions)}</p>
+        </div>
+    `;
+    
+    if (skill.examples && skill.examples.length > 0) {
+        content += `
+            <div class="detail-section">
+                <h3>示例</h3>
+                <p>${skill.examples.map(e => escapeHtml(e)).join('\n')}</p>
+            </div>
+        `;
+    }
+    
+    document.getElementById('skillDetailContent').innerHTML = content;
+    document.getElementById('skillDetailModal').classList.add('active');
+}
+
+function closeDetailModal() {
+    document.getElementById('skillDetailModal').classList.remove('active');
+}
+
+document.getElementById('skillModal').addEventListener('click', (e) => {
+    if (e.target.id === 'skillModal') closeModal();
+});
+
+document.getElementById('skillDetailModal').addEventListener('click', (e) => {
+    if (e.target.id === 'skillDetailModal') closeDetailModal();
+});
+
+loadSkills();
+</script>
+{{end}}

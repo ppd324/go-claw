@@ -79,6 +79,7 @@ func NewServer(cfg *config.Config, agentManager *agent.Manager, repo *storage.Re
 		"internal/dashboard/templates/settings.html",
 		"internal/dashboard/templates/scheduled-tasks.html",
 		"internal/dashboard/templates/workspace.html",
+		"internal/dashboard/templates/skills.html",
 	}
 
 	templates = template.Must(templates.ParseFiles(templateFiles...))
@@ -109,6 +110,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/c/", s.handleConversationDetail)
 	mux.HandleFunc("/agents", s.handleAgents)
 	mux.HandleFunc("/scheduled-tasks", s.handleScheduledTasks)
+	mux.HandleFunc("/skills", s.handleSkills)
 	mux.HandleFunc("/workspace", s.handleWorkspace)
 	mux.HandleFunc("/settings", s.handleSettings)
 
@@ -135,6 +137,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/scheduled-tasks", s.handleAPIScheduledTasks)
 	mux.HandleFunc("/api/scheduled-task", s.handleAPIScheduledTask)
 	mux.HandleFunc("/api/task-logs", s.handleAPITaskLogs)
+
+	// Skills API routes
+	mux.HandleFunc("/api/skills", s.handleAPISkills)
+	mux.HandleFunc("/api/skill", s.handleAPISkill)
 }
 
 func (s *Server) SetNotifyRegistry(registry *notify.Registry) {
@@ -228,6 +234,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		Title:           "Settings",
 		ContentTemplate: "settings.content",
 		Config:          s.cfg,
+	})
+}
+
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	_ = s.templates.ExecuteTemplate(w, "skills.html", pageData{
+		Title:           "Skills",
+		ContentTemplate: "skills.content",
 	})
 }
 
@@ -1078,4 +1091,177 @@ func formatSize(bytes int64) string {
 		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
 	}
 	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+}
+
+// Skills API Handlers
+
+func (s *Server) handleAPISkills(w http.ResponseWriter, r *http.Request) {
+	skillManager := s.agentManager.GetSkillManager()
+	if skillManager == nil {
+		s.JSONError(w, "skill manager not available", http.StatusInternalServerError)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		skills := skillManager.ListEnabled()
+		s.JSON(w, skills)
+
+	case http.MethodPost:
+		var req struct {
+			Name         string   `json:"name"`
+			Command      string   `json:"command"`
+			Description  string   `json:"description"`
+			Instructions string   `json:"instructions"`
+			Tools        []string `json:"tools"`
+			Category     string   `json:"category"`
+			Tags         []string `json:"tags"`
+			Examples     []string `json:"examples"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.JSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Name == "" || req.Description == "" || req.Instructions == "" {
+			s.JSONError(w, "name, description, and instructions are required", http.StatusBadRequest)
+			return
+		}
+
+		command := req.Command
+		if command == "" {
+			command = "/" + strings.ToLower(strings.ReplaceAll(req.Name, " ", "-"))
+		}
+
+		skill, err := skillManager.Create(req.Name, command, req.Description, req.Instructions)
+		if err != nil {
+			s.JSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Tools) > 0 {
+			skill.Tools = req.Tools
+		}
+		if req.Category != "" {
+			skill.Category = req.Category
+		}
+		if len(req.Tags) > 0 {
+			skill.Tags = req.Tags
+		}
+		if len(req.Examples) > 0 {
+			skill.Examples = req.Examples
+		}
+
+		if err := skillManager.Update(skill); err != nil {
+			s.JSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		s.JSON(w, skill)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleAPISkill(w http.ResponseWriter, r *http.Request) {
+	skillManager := s.agentManager.GetSkillManager()
+	if skillManager == nil {
+		s.JSONError(w, "skill manager not available", http.StatusInternalServerError)
+		return
+	}
+
+	command := r.URL.Query().Get("command")
+	name := r.URL.Query().Get("name")
+
+	switch r.Method {
+	case http.MethodGet:
+		var skill interface{}
+		var found bool
+
+		if command != "" {
+			skill, found = skillManager.Get(command)
+		} else if name != "" {
+			skill, found = skillManager.GetByName(name)
+		} else {
+			s.JSONError(w, "command or name parameter required", http.StatusBadRequest)
+			return
+		}
+
+		if !found {
+			s.JSONError(w, "skill not found", http.StatusNotFound)
+			return
+		}
+
+		s.JSON(w, skill)
+
+	case http.MethodPut:
+		if command == "" {
+			s.JSONError(w, "command parameter required", http.StatusBadRequest)
+			return
+		}
+
+		skill, found := skillManager.Get(command)
+		if !found {
+			s.JSONError(w, "skill not found", http.StatusNotFound)
+			return
+		}
+
+		var req struct {
+			Description  string   `json:"description"`
+			Instructions string   `json:"instructions"`
+			Tools        []string `json:"tools"`
+			Category     string   `json:"category"`
+			Tags         []string `json:"tags"`
+			Examples     []string `json:"examples"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.JSONError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Description != "" {
+			skill.Description = req.Description
+		}
+		if req.Instructions != "" {
+			skill.Instructions = req.Instructions
+		}
+		if req.Tools != nil {
+			skill.Tools = req.Tools
+		}
+		if req.Category != "" {
+			skill.Category = req.Category
+		}
+		if req.Tags != nil {
+			skill.Tags = req.Tags
+		}
+		if req.Examples != nil {
+			skill.Examples = req.Examples
+		}
+
+		if err := skillManager.Update(skill); err != nil {
+			s.JSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		s.JSON(w, skill)
+
+	case http.MethodDelete:
+		if command == "" {
+			s.JSONError(w, "command parameter required", http.StatusBadRequest)
+			return
+		}
+
+		if err := skillManager.Delete(command); err != nil {
+			s.JSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		s.JSON(w, map[string]interface{}{"success": true})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }

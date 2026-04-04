@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/template"
+	"time"
+
+	"go-claw/internal/skills"
 )
 
 type WorkspaceFile string
@@ -19,11 +23,13 @@ const (
 	FileAGENTS    WorkspaceFile = "AGENTS.md"
 	FileBOOT      WorkspaceFile = "BOOT.md"
 	FileHEARTBEAT WorkspaceFile = "HEARTBEAT.md"
+	FileSKILLS    WorkspaceFile = "SKILLS.md"
 )
 
 type ContextManager struct {
-	workspace string
-	files     map[WorkspaceFile]string
+	workspace    string
+	files        map[WorkspaceFile]string
+	skillManager *skills.Manager
 }
 
 type ContextData struct {
@@ -34,9 +40,23 @@ type ContextData struct {
 	Agents    string
 	Boot      string
 	Heartbeat string
+	Skills    string
 	Time      string
 	Date      string
 	Custom    map[string]string
+	Env       *EnvironmentInfo
+}
+
+type EnvironmentInfo struct {
+	OS          string
+	Arch        string
+	WorkDir     string
+	CurrentTime string
+	Date        string
+	Timezone    string
+	Hostname    string
+	Username    string
+	ShellHint   string
 }
 
 type PromptTemplate struct {
@@ -53,8 +73,20 @@ func NewContextManager(workspace string) *ContextManager {
 	}
 }
 
+func NewContextManagerWithSkills(workspace string, skillManager *skills.Manager) *ContextManager {
+	return &ContextManager{
+		workspace:    workspace,
+		files:        make(map[WorkspaceFile]string),
+		skillManager: skillManager,
+	}
+}
+
+func (cm *ContextManager) SetSkillManager(sm *skills.Manager) {
+	cm.skillManager = sm
+}
+
 func (cm *ContextManager) Load() error {
-	files := []WorkspaceFile{FileSOUL, FileUSER, FileMEMORY, FileIDENTITY, FileAGENTS, FileBOOT, FileHEARTBEAT}
+	files := []WorkspaceFile{FileSOUL, FileUSER, FileMEMORY, FileIDENTITY, FileAGENTS, FileBOOT, FileHEARTBEAT, FileSKILLS}
 	for _, f := range files {
 		path := filepath.Join(cm.workspace, string(f))
 		if content, err := os.ReadFile(path); err == nil {
@@ -72,6 +104,54 @@ func (cm *ContextManager) Set(f WorkspaceFile, content string) error {
 	cm.files[f] = content
 	path := filepath.Join(cm.workspace, string(f))
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func (cm *ContextManager) GetEnvironmentInfo() *EnvironmentInfo {
+	now := time.Now()
+	hostname, _ := os.Hostname()
+	username := os.Getenv("USER")
+	if username == "" {
+		username = os.Getenv("USERNAME")
+	}
+
+	_, offset := now.Zone()
+	tzName := now.Location().String()
+	if tzName == "Local" {
+		tzName = fmt.Sprintf("UTC%+d", offset/3600)
+	}
+
+	var shellHint string
+	switch runtime.GOOS {
+	case "windows":
+		shellHint = `IMPORTANT: You are running on Windows. When using command-line tools:
+- Use PowerShell/CMD commands (e.g., dir, type, copy, del, move)
+- Use backslashes \ for paths
+- Use "cmd /C" for shell commands
+- Do NOT use Unix commands like ls, cat, rm, cp, mv`
+	case "darwin":
+		shellHint = `IMPORTANT: You are running on macOS. When using command-line tools:
+- Use Unix/BSD commands (e.g., ls, cat, rm, cp, mv)
+- Use forward slashes / for paths
+- Use "sh -c" for shell commands
+- macOS-specific: use "open" to open files, "brew" for package management`
+	default:
+		shellHint = `IMPORTANT: You are running on Linux/Unix. When using command-line tools:
+- Use Unix/Linux commands (e.g., ls, cat, rm, cp, mv)
+- Use forward slashes / for paths
+- Use "sh -c" for shell commands`
+	}
+
+	return &EnvironmentInfo{
+		OS:          runtime.GOOS,
+		Arch:        runtime.GOARCH,
+		WorkDir:     cm.workspace,
+		CurrentTime: now.Format("15:04:05"),
+		Date:        now.Format("2006-01-02"),
+		Timezone:    tzName,
+		Hostname:    hostname,
+		Username:    username,
+		ShellHint:   shellHint,
+	}
 }
 
 func (cm *ContextManager) BuildSystemPrompt() string {
@@ -119,10 +199,59 @@ func (cm *ContextManager) BuildSystemPrompt() string {
 		sb.WriteString("\n\n")
 	}
 
+	if skillsPrompt := cm.BuildSkillsPrompt(); skillsPrompt != "" {
+		sb.WriteString(skillsPrompt)
+		sb.WriteString("\n\n")
+	}
+
+	return sb.String()
+}
+
+func (cm *ContextManager) BuildSkillsPrompt() string {
+	if cm.skillManager == nil {
+		return cm.Get(FileSKILLS)
+	}
+
+	skillList := cm.skillManager.ListEnabled()
+	if len(skillList) == 0 {
+		return cm.Get(FileSKILLS)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Available Skills\n\n")
+	sb.WriteString("You have access to the following skills. Each skill provides specialized capabilities.\n\n")
+	sb.WriteString("<available_skills>\n")
+
+	for _, skill := range skillList {
+		sb.WriteString(fmt.Sprintf("<skill>\n"))
+		sb.WriteString(fmt.Sprintf("<name>%s</name>\n", skill.Name))
+		sb.WriteString(fmt.Sprintf("<command>%s</command>\n", skill.Command))
+		sb.WriteString(fmt.Sprintf("<description>%s</description>\n", skill.Description))
+		if skill.Source != "" {
+			sb.WriteString(fmt.Sprintf("<location>%s/SKILL.md</location>\n", skill.Source))
+		}
+		sb.WriteString(fmt.Sprintf("</skill>\n"))
+	}
+
+	sb.WriteString("</available_skills>\n\n")
+	sb.WriteString("**How to use skills:**\n")
+	sb.WriteString("1. When the user's request matches a skill's description, use the `read` tool to load the SKILL.md file from the skill's location\n")
+	sb.WriteString("2. Read and follow the instructions in the SKILL.md file\n")
+	sb.WriteString("3. Execute the skill's workflow step by step\n")
+	sb.WriteString("4. You can also directly invoke a skill by mentioning its command (e.g., `/天气`)\n\n")
+	sb.WriteString("**Important:** Do NOT load all skills at once. Only load the skill that is relevant to the current task.\n")
+
 	return sb.String()
 }
 
 func (cm *ContextManager) BuildPrompt(req *ExecuteRequest, history string, extraSystem string) string {
+	skillsPrompt := ""
+	if cm.skillManager != nil {
+		skillsPrompt = cm.BuildSkillsPrompt()
+	}
+
+	envInfo := cm.GetEnvironmentInfo()
+
 	data := &PromptTemplate{
 		Context: &ContextData{
 			Soul:      cm.Get(FileSOUL),
@@ -132,6 +261,8 @@ func (cm *ContextManager) BuildPrompt(req *ExecuteRequest, history string, extra
 			Agents:    cm.Get(FileAGENTS),
 			Boot:      cm.Get(FileBOOT),
 			Heartbeat: cm.Get(FileHEARTBEAT),
+			Skills:    skillsPrompt,
+			Env:       envInfo,
 		},
 		System:  extraSystem,
 		History: history,
@@ -159,7 +290,19 @@ func (cm *ContextManager) BuildPrompt(req *ExecuteRequest, history string, extra
 {{end}}{{if .Context.Heartbeat}}## Heartbeat
 {{.Context.Heartbeat}}
 
-{{end}}{{if .System}}{{.System}}
+{{end}}{{if .Context.Skills}}{{.Context.Skills}}
+
+{{end}}## Environment
+- OS: {{.Context.Env.OS}} ({{.Context.Env.Arch}})
+- Working Directory: {{.Context.Env.WorkDir}}
+- Date: {{.Context.Env.Date}}
+- Time: {{.Context.Env.CurrentTime}} ({{.Context.Env.Timezone}})
+{{if .Context.Env.Hostname}}- Hostname: {{.Context.Env.Hostname}}{{end}}
+{{if .Context.Env.Username}}- User: {{.Context.Env.Username}}{{end}}
+
+{{.Context.Env.ShellHint}}
+
+{{if .System}}{{.System}}
 
 {{end}}## Conversation
 {{.History}}

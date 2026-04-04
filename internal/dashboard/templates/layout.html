@@ -1120,6 +1120,10 @@
                 <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                 定时任务
             </a>
+            <a href="/skills" class="{{if eq .Title "Skills"}}active{{end}}">
+                <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                技能管理
+            </a>
             <a href="/workspace" class="{{if eq .Title "Workspace"}}active{{end}}">
                 <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
                 工作区
@@ -1150,6 +1154,8 @@
         {{template "workspace.content" .}}
         {{else if eq .ContentTemplate "settings.content"}}
         {{template "settings.content" .}}
+        {{else if eq .ContentTemplate "skills.content"}}
+        {{template "skills.content" .}}
         {{end}}
     </main>
 </div>

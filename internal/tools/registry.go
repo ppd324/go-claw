@@ -97,6 +97,8 @@ func NewDefaultToolRegistry(baseDir string) *DefaultToolRegistry {
 	r.Register(NewListDirTool(baseDir))
 	r.Register(NewTodoTool(baseDir + "/.todo.json"))
 	r.Register(NewGetCurrentTimeTool())
+	r.Register(NewWebSearchTool())
+	r.Register(NewWebFetchTool())
 
 	return &DefaultToolRegistry{ToolRegistry: r}
 }

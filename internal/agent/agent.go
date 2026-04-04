@@ -167,6 +167,7 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 	} else {
 		systemPrompt = a.systemPrompt()
 	}
+	fmt.Println(systemPrompt)
 
 	model := a.getModel()
 	toolList := a.toolRegistry.List()
