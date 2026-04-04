@@ -33,9 +33,16 @@
         <div class="chat-input-area">
             <div class="chat-input-wrapper">
                 <textarea id="chatInput" class="chat-input" placeholder="输入你的消息...（Shift+Enter 换行）" rows="1"></textarea>
-                <button class="btn btn-primary send-btn" onclick="sendMessage()" id="sendBtn">
-                    <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
-                </button>
+                <div class="chat-input-actions">
+                    <label class="stream-toggle" title="流式输出">
+                        <input type="checkbox" id="streamToggle" checked>
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">流式</span>
+                    </label>
+                    <button class="btn btn-primary send-btn" onclick="sendMessage()" id="sendBtn">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -45,8 +52,13 @@
 const sessionId = "{{.SessionID}}";
 let isSending = false;
 let ws = null;
+let currentStreamContent = '';
+let currentToolCalls = [];
 
-// Initialize WebSocket connection
+function isStreamMode() {
+    return document.getElementById('streamToggle').checked;
+}
+
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -55,7 +67,6 @@ function initWebSocket() {
     
     ws.onopen = function() {
         console.log('WebSocket connected');
-        // Authenticate after connection
         const authMsg = {
             type: 'auth',
             payload: {
@@ -63,44 +74,49 @@ function initWebSocket() {
                 platform_chat_id: 'dashboard-web-' + Date.now()
             }
         };
-        console.log('Sending auth message:', JSON.stringify(authMsg));
         ws.send(JSON.stringify(authMsg));
-        console.log('Auth message sent');
     };
     
     ws.onmessage = function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            console.log('WebSocket message received:', data);
-            
-            // Handle auth response
-            if (data.type === 'auth_ok') {
-                console.log('WebSocket authenticated successfully, client_id:', data.payload.client_id);
-                return;
+        const messages = event.data.split('\n').filter(line => line.trim());
+        
+        for (const msgStr of messages) {
+            try {
+                const data = JSON.parse(msgStr);
+                console.log('WebSocket message received:', data);
+                
+                if (data.type === 'auth_ok') {
+                    console.log('WebSocket authenticated');
+                    return;
+                }
+                
+                if (data.type === 'error') {
+                    console.error('WebSocket error:', data.payload);
+                    showChatBanner(data.payload.message || data.payload, true);
+                    isSending = false;
+                    updateSendButton(false);
+                    return;
+                }
+                
+                if (data.type === 'stream_event') {
+                    handleStreamEvent(data.payload);
+                    continue;
+                }
+                
+                if (data.type === 'new_message' && data.payload.session_id === sessionId) {
+                    handleNewMessage(data.payload.message);
+                } else if (data.type === 'session_update' && data.payload.session_id === sessionId) {
+                    loadConversation();
+                }
+            } catch (err) {
+                console.error('Failed to parse WebSocket message:', err, msgStr);
             }
-            
-            // Handle error
-            if (data.type === 'error') {
-                console.error('WebSocket error:', data.payload.message);
-                return;
-            }
-            
-            if (data.type === 'new_message' && data.payload.session_id === sessionId) {
-                // New message received, update UI
-                // The actual message content is in data.payload.message
-                handleNewMessage(data.payload.message);
-            } else if (data.type === 'session_update' && data.payload.session_id === sessionId) {
-                // Session updated, refresh
-                loadConversation();
-            }
-        } catch (err) {
-            console.error('Failed to parse WebSocket message:', err);
         }
     };
     
     ws.onclose = function() {
         console.log('WebSocket disconnected, reconnecting...');
-        setTimeout(initWebSocket, 3000); // Reconnect after 3 seconds
+        setTimeout(initWebSocket, 3000);
     };
     
     ws.onerror = function(error) {
@@ -108,22 +124,176 @@ function initWebSocket() {
     };
 }
 
-// Handle new message from WebSocket
-function handleNewMessage(payload) {
-    console.log('Handling new message from WebSocket:', payload);
+function handleStreamEvent(event) {
+    console.log('Stream event:', event.type, event.data);
     
-    // Remove "thinking" message if exists
+    switch (event.type) {
+        case 'start':
+            currentStreamContent = '';
+            currentToolCalls = [];
+            appendMessage('assistant', '');
+            break;
+            
+        case 'content':
+            if (event.data && event.data.content) {
+                currentStreamContent += event.data.content;
+                updateAssistantMessageContent(currentStreamContent);
+            }
+            break;
+            
+        case 'reasoning':
+            if (event.data && event.data.content) {
+                showReasoning(event.data.content);
+            }
+            break;
+            
+        case 'tool_call':
+            if (event.data) {
+                currentToolCalls.push({
+                    tool_name: event.data.tool_name,
+                    input: event.data.input,
+                    call_id: event.data.call_id,
+                    pending: true
+                });
+                updateAssistantMessageWithTools(currentStreamContent, currentToolCalls);
+            }
+            break;
+            
+        case 'tool_result':
+            if (event.data) {
+                const tc = currentToolCalls.find(t => t.tool_name === event.data.tool_name && t.pending);
+                if (tc) {
+                    tc.output = event.data.output;
+                    tc.success = event.data.success;
+                    tc.pending = false;
+                }
+                updateAssistantMessageWithTools(currentStreamContent, currentToolCalls);
+            }
+            break;
+            
+        case 'iteration':
+            if (event.data) {
+                showIteration(event.data.current, event.data.max);
+            }
+            break;
+            
+        case 'complete':
+            console.log('Stream complete:', event.data);
+            if (event.data && event.data.content) {
+                currentStreamContent = event.data.content;
+                updateAssistantMessageContent(currentStreamContent);
+            }
+            if (event.data && event.data.message_id) {
+                const container = document.getElementById('messages');
+                const lastMessage = container.querySelector('.message.assistant:last-child');
+                if (lastMessage) {
+                    lastMessage.setAttribute('data-message-id', event.data.message_id);
+                }
+            }
+            isSending = false;
+            updateSendButton(false);
+            updateSessionInfo();
+            break;
+            
+        case 'error':
+            showChatBanner(event.data || '发生错误', true);
+            isSending = false;
+            updateSendButton(false);
+            break;
+    }
+}
+
+function updateAssistantMessageContent(content) {
+    const container = document.getElementById('messages');
+    const lastMessage = container.querySelector('.message.assistant:last-child');
+    
+    if (lastMessage) {
+        const contentEl = lastMessage.querySelector('.message-content');
+        contentEl.innerHTML = escapeHtml(content);
+    }
+    container.scrollTop = container.scrollHeight;
+}
+
+function updateAssistantMessageWithTools(content, toolCalls) {
+    const container = document.getElementById('messages');
+    const lastMessage = container.querySelector('.message.assistant:last-child');
+    
+    let toolCallsHtml = '';
+    if (toolCalls && toolCalls.length > 0) {
+        toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
+            const statusClass = tc.pending ? 'pending' : (tc.success ? 'success' : 'error');
+            const statusIcon = tc.pending ? '⏳' : (tc.success ? '✓' : '✗');
+            const toggleText = tc.pending ? '执行中...' : (tc.success ? '展开' : '查看错误');
+            
+            return `
+            <details class="tool-call ${statusClass}" ${tc.pending ? 'open' : ''}>
+                <summary class="tool-call-summary">
+                    <span class="tool-call-icon">🔧</span>
+                    <span class="tool-call-name">${escapeHtml(tc.tool_name)}</span>
+                    <span class="tool-call-status">${statusIcon}</span>
+                    <span class="tool-call-toggle">${toggleText}</span>
+                </summary>
+                <div class="tool-call-content">
+                    <div class="tool-call-label">输入:</div>
+                    <pre>${escapeHtml(tc.input || '')}</pre>
+                    ${tc.output ? `<div class="tool-call-label">输出:</div><pre>${escapeHtml(tc.output)}</pre>` : ''}
+                </div>
+            </details>
+        `}).join('')}</div>`;
+    }
+
+    if (lastMessage) {
+        const contentEl = lastMessage.querySelector('.message-content');
+        contentEl.innerHTML = escapeHtml(content) + toolCallsHtml;
+    }
+    
+    container.scrollTop = container.scrollHeight;
+}
+
+function showReasoning(content) {
+    const container = document.getElementById('messages');
+    const lastMessage = container.querySelector('.message.assistant:last-child');
+    
+    if (lastMessage) {
+        let reasoningEl = lastMessage.querySelector('.reasoning-block');
+        if (!reasoningEl) {
+            const contentEl = lastMessage.querySelector('.message-content');
+            reasoningEl = document.createElement('div');
+            reasoningEl.className = 'reasoning-block';
+            reasoningEl.innerHTML = '<div class="reasoning-label">💭 思考中...</div><div class="reasoning-content"></div>';
+            contentEl.insertBefore(reasoningEl, contentEl.firstChild);
+        }
+        const contentDiv = reasoningEl.querySelector('.reasoning-content');
+        contentDiv.textContent = content;
+    }
+}
+
+function showIteration(current, max) {
+    const container = document.getElementById('messages');
+    const lastMessage = container.querySelector('.message.assistant:last-child');
+    
+    if (lastMessage) {
+        let iterEl = lastMessage.querySelector('.iteration-indicator');
+        if (!iterEl) {
+            const contentEl = lastMessage.querySelector('.message-content');
+            iterEl = document.createElement('div');
+            iterEl.className = 'iteration-indicator';
+            contentEl.appendChild(iterEl);
+        }
+        iterEl.textContent = `迭代 ${current}/${max}`;
+    }
+}
+
+function handleNewMessage(payload) {
     const lastMsg = document.querySelector('.message.assistant:last-child');
     if (lastMsg && lastMsg.querySelector('.message-content').textContent === '思考中...') {
         lastMsg.remove();
     }
     
-    // Add assistant message with tool calls
     if (payload.content) {
         appendMessage('assistant', payload.content, payload.tool_calls || []);
     }
     
-    // Update session info
     updateSessionInfo();
 }
 
@@ -151,12 +321,9 @@ function renderMessages(messages) {
     container.innerHTML = messages.map(msg => {
         const isUser = msg.role === 'user';
         const isAssistant = msg.role === 'assistant';
-        
-        // 检查是否有工具调用
         const toolCalls = msg.tool_calls || [];
         
         if (isAssistant && toolCalls.length > 0) {
-            // 渲染带工具调用的助手消息
             let toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
                 const isSuccess = tc.success !== false;
                 return `
@@ -186,7 +353,6 @@ function renderMessages(messages) {
                 </div>
             `;
         } else {
-            // 渲染普通消息
             return `
                 <div class="message ${isUser ? 'user' : 'assistant'}">
                     <div class="message-avatar">
@@ -215,7 +381,6 @@ function appendMessage(role, content, toolCalls = []) {
     let toolCallsHtml = '';
     if (toolCalls && toolCalls.length > 0) {
         toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
-            console.log('Appending tool call:', tc);
             return `
             <div class="tool-call ${tc.success ? 'success' : 'error'}">
                 <div class="tool-call-header">
@@ -249,59 +414,14 @@ function appendMessage(role, content, toolCalls = []) {
     container.scrollTop = container.scrollHeight;
 }
 
-function updateAssistantMessage(content, toolCalls = []) {
-    const container = document.getElementById('messages');
-    const lastMessage = container.querySelector('.message.assistant:last-child');
-    
-    console.log('updateAssistantMessage called with:', { content, toolCalls });
-    console.log('toolCalls length:', toolCalls ? toolCalls.length : 'undefined');
-    console.log('lastMessage:', lastMessage);
-    
-    let toolCallsHtml = '';
-    if (toolCalls && toolCalls.length > 0) {
-        console.log('Rendering tool calls...');
-        toolCallsHtml = `<div class="tool-calls">${toolCalls.map(tc => {
-            console.log('Rendering tool call:', tc);
-            const toolName = tc.tool_name || tc.toolName || 'Unknown';
-            const toolInput = tc.input || tc.Input || '';
-            const toolOutput = tc.output || tc.Output || '';
-            const isSuccess = tc.success;
-            
-            return `
-            <details class="tool-call ${isSuccess ? 'success' : 'error'}">
-                <summary class="tool-call-summary">
-                    <span class="tool-call-icon">🔧</span>
-                    <span class="tool-call-name">${escapeHtml(toolName)}</span>
-                    <span class="tool-call-status">${isSuccess ? '✓' : '✗'}</span>
-                    <span class="tool-call-toggle">${isSuccess ? '展开' : '查看错误'}</span>
-                </summary>
-                <div class="tool-call-content">
-                    <div class="tool-call-label">输入:</div>
-                    <pre>${escapeHtml(toolInput)}</pre>
-                    <div class="tool-call-label">输出:</div>
-                    <pre>${escapeHtml(toolOutput)}</pre>
-                </div>
-            </details>
-        `}).join('')}</div>`;
-        console.log('toolCallsHtml generated:', toolCallsHtml);
-    }
-
-    const messageContent = escapeHtml(content) + toolCallsHtml;
-    console.log('Final messageContent:', messageContent);
-    console.log('content escaped:', escapeHtml(content));
-
-    if (lastMessage) {
-        const contentEl = lastMessage.querySelector('.message-content');
-        console.log('contentEl:', contentEl);
-        console.log('Setting innerHTML to:', messageContent);
-        contentEl.innerHTML = messageContent;
-        console.log('innerHTML after set:', contentEl.innerHTML);
+function updateSendButton(sending) {
+    const sendBtn = document.getElementById('sendBtn');
+    sendBtn.disabled = sending;
+    if (sending) {
+        sendBtn.innerHTML = '<span class="loading-dots">...</span>';
     } else {
-        console.log('No last message, appending new one');
-        appendMessage('assistant', content, toolCalls);
+        sendBtn.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>';
     }
-    
-    container.scrollTop = container.scrollHeight;
 }
 
 async function loadConversation() {
@@ -339,51 +459,53 @@ async function sendMessage() {
     }
 
     isSending = true;
-    const sendBtn = document.getElementById('sendBtn');
-    sendBtn.disabled = true;
-    sendBtn.innerHTML = '<span>...</span>';
+    updateSendButton(true);
 
-    // 立即显示用户消息
     appendMessage('user', content);
     input.value = '';
     input.style.height = 'auto';
 
-    // 创建空的助手消息
-    appendMessage('assistant', '思考中...');
+    const streamMode = isStreamMode();
 
-    try {
-        const response = await fetch('/api/messages', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ session_id: sessionId, content })
-        });
-        
-        const data = await response.json();
-        console.log('API Response:', data);
-
-        if (!response.ok) {
-            showChatBanner(data.error || '发送失败', true);
-            // 移除空的助手消息
-            const lastMsg = document.querySelector('.message.assistant:last-child');
-            if (lastMsg && lastMsg.querySelector('.message-content').textContent === '思考中...') {
-                lastMsg.remove();
+    if (streamMode && ws && ws.readyState === WebSocket.OPEN) {
+        const msg = {
+            type: 'message',
+            payload: {
+                session_id: sessionId,
+                content: content,
+                stream: true
             }
-            return;
+        };
+        ws.send(JSON.stringify(msg));
+    } else {
+        if (streamMode) {
+            showChatBanner('WebSocket 未连接，使用 HTTP 发送', true);
         }
+        try {
+            const response = await fetch('/api/messages', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ session_id: sessionId, content })
+            });
+            
+            const data = await response.json();
 
-        // WebSocket will handle the response update
-        // Just keep the "thinking" message until WebSocket response arrives
-        console.log('Message sent, waiting for WebSocket response...');
-    } catch (err) {
-        showChatBanner('请求失败：' + err.message, true);
-    } finally {
+            if (!response.ok) {
+                showChatBanner(data.error || '发送失败', true);
+                isSending = false;
+                updateSendButton(false);
+                return;
+            }
+            
+            appendMessage('assistant', data.content || '', data.tool_calls || []);
+        } catch (err) {
+            showChatBanner('请求失败：' + err.message, true);
+        }
         isSending = false;
-        sendBtn.disabled = false;
-        sendBtn.innerHTML = '<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>';
-        
-        // 更新会话信息，但不重新渲染消息（避免覆盖工具调用显示）
-        updateSessionInfo();
+        updateSendButton(false);
     }
+    
+    updateSessionInfo();
 }
 
 async function updateSessionInfo() {
@@ -422,9 +544,7 @@ document.getElementById('chatInput').addEventListener('input', function() {
     this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
 
-// Initialize WebSocket on page load
 initWebSocket();
-
 loadConversation();
 </script>
 {{end}}

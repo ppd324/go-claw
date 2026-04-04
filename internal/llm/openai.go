@@ -180,8 +180,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest, handl
 
 	body, _ := json.Marshal(payload)
 
+	baseUrl := p.baseUrl
+	if baseUrl == "" {
+		baseUrl = "https://api.openai.com/v1"
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, "POST",
-		"https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions", bytes.NewReader(body))
+		baseUrl+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		handler.OnError(err)
 		return err
@@ -206,6 +211,31 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest, handl
 
 	reader := bufio.NewReader(resp.Body)
 	var content string
+	var reasoningContent string
+	var toolCalls []ToolCall
+	var inputTokens, outputTokens int
+	var lastChunk struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage,omitempty"`
+	}
 
 	for {
 		select {
@@ -235,23 +265,89 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest, handl
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage,omitempty"`
 		}
 
 		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {
 			continue
 		}
 
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			content += chunk.Choices[0].Delta.Content
-			handler.OnContent(chunk.Choices[0].Delta.Content)
+		lastChunk = chunk
+
+		if len(chunk.Choices) > 0 {
+			delta := chunk.Choices[0].Delta
+
+			if delta.Content != "" {
+				content += delta.Content
+				handler.OnContent(delta.Content)
+			}
+
+			if delta.ReasoningContent != "" {
+				reasoningContent += delta.ReasoningContent
+			}
+
+			for _, tc := range delta.ToolCalls {
+				for len(toolCalls) <= tc.Index {
+					toolCalls = append(toolCalls, ToolCall{})
+				}
+				if tc.ID != "" {
+					toolCalls[tc.Index].ID = tc.ID
+				}
+				if tc.Type != "" {
+					toolCalls[tc.Index].Type = tc.Type
+				}
+				if tc.Function.Name != "" {
+					toolCalls[tc.Index].Function.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					toolCalls[tc.Index].Function.Arguments += tc.Function.Arguments
+				}
+				toolCalls[tc.Index].Index = tc.Index
+			}
+		}
+
+		if chunk.Usage != nil {
+			inputTokens = chunk.Usage.PromptTokens
+			outputTokens = chunk.Usage.CompletionTokens
+		}
+	}
+
+	var finishReason string
+	if len(lastChunk.Choices) > 0 {
+		finishReason = lastChunk.Choices[0].FinishReason
+	}
+
+	validToolCalls := make([]ToolCall, 0)
+	for _, tc := range toolCalls {
+		if tc.Function.Name != "" {
+			validToolCalls = append(validToolCalls, tc)
 		}
 	}
 
 	handler.OnComplete(&ChatResponse{
-		Content: content,
+		Content:       content,
+		ReasonContent: reasoningContent,
+		InputTokens:   inputTokens,
+		OutputTokens:  outputTokens,
+		StopReason:    finishReason,
+		ToolCalls:     validToolCalls,
 	})
 
 	return nil

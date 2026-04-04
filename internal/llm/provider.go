@@ -50,14 +50,12 @@ type Message struct {
 	} `json:"tool_call,omitempty"`
 }
 
-// StreamHandler handles streaming responses
 type StreamHandler interface {
 	OnContent(content string)
 	OnComplete(response *ChatResponse)
 	OnError(err error)
 }
 
-// StreamHandlerFunc is a function adapter for StreamHandler
 type StreamHandlerFunc struct {
 	OnContentFunc  func(string)
 	OnCompleteFunc func(*ChatResponse)
@@ -82,11 +80,78 @@ func (h *StreamHandlerFunc) OnError(err error) {
 	}
 }
 
-// NewStreamHandler creates a StreamHandler from functions
 func NewStreamHandler(onContent func(string), onComplete func(*ChatResponse), onError func(error)) StreamHandler {
 	return &StreamHandlerFunc{
 		OnContentFunc:  onContent,
 		OnCompleteFunc: onComplete,
 		OnErrorFunc:    onError,
 	}
+}
+
+type AgentStreamEvent struct {
+	Type      string      `json:"type"`
+	Data      interface{} `json:"data,omitempty"`
+	Timestamp int64       `json:"timestamp"`
+}
+
+const (
+	EventTypeContent    = "content"
+	EventTypeReasoning  = "reasoning"
+	EventTypeToolCall   = "tool_call"
+	EventTypeToolResult = "tool_result"
+	EventTypeComplete   = "complete"
+	EventTypeError      = "error"
+	EventTypeStart      = "start"
+	EventTypeIteration  = "iteration"
+)
+
+type ContentEvent struct {
+	Content string `json:"content"`
+	Delta   bool   `json:"delta"`
+}
+
+type ReasoningEvent struct {
+	Content string `json:"content"`
+}
+
+type ToolCallEvent struct {
+	ToolName string `json:"tool_name"`
+	Input    string `json:"input"`
+	CallID   string `json:"call_id"`
+}
+
+type ToolResultEvent struct {
+	ToolName string `json:"tool_name"`
+	Output   string `json:"output"`
+	Success  bool   `json:"success"`
+}
+
+type CompleteEvent struct {
+	Content      string `json:"content"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	MessageID    string `json:"message_id,omitempty"`
+}
+
+type IterationEvent struct {
+	Current int `json:"current"`
+	Max     int `json:"max"`
+}
+
+type AgentStreamHandler interface {
+	OnEvent(event *AgentStreamEvent)
+}
+
+type AgentStreamHandlerFunc struct {
+	OnEventFunc func(*AgentStreamEvent)
+}
+
+func (h *AgentStreamHandlerFunc) OnEvent(event *AgentStreamEvent) {
+	if h.OnEventFunc != nil {
+		h.OnEventFunc(event)
+	}
+}
+
+func NewAgentStreamHandler(onEvent func(*AgentStreamEvent)) AgentStreamHandler {
+	return &AgentStreamHandlerFunc{OnEventFunc: onEvent}
 }

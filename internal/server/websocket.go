@@ -12,6 +12,7 @@ import (
 
 	"go-claw/internal/agent"
 	"go-claw/internal/config"
+	"go-claw/internal/llm"
 	"go-claw/internal/storage"
 
 	"github.com/gorilla/websocket"
@@ -262,6 +263,7 @@ func (s *WebSocketServer) handleChatMessage(client *Client, payload json.RawMess
 		Content   string `json:"content"`
 		SessionID string `json:"session_id,omitempty"`
 		AgentID   uint   `json:"agent_id,omitempty"`
+		Stream    bool   `json:"stream,omitempty"`
 	}
 
 	if err := json.Unmarshal(payload, &msg); err != nil {
@@ -269,14 +271,12 @@ func (s *WebSocketServer) handleChatMessage(client *Client, payload json.RawMess
 		return
 	}
 
-	// Get or create session
 	session, err := s.getOrCreateSession(client, msg.SessionID, msg.AgentID)
 	if err != nil {
 		s.sendError(client, fmt.Sprintf("session error: %v", err))
 		return
 	}
 
-	// Save user message
 	userMsg := &storage.Message{
 		MessageID: generateMessageID(),
 		Content:   msg.Content,
@@ -288,39 +288,61 @@ func (s *WebSocketServer) handleChatMessage(client *Client, payload json.RawMess
 		return
 	}
 
-	// Get agent
 	agentInstance, err := s.agentManager.GetAgent(session.AgentID)
 	if err != nil {
 		s.sendError(client, "agent not found")
 		return
 	}
 
-	// Process message through agent
 	ctx := context.Background()
-	response, err := agentInstance.ProcessMessage(ctx, msg.Content, session.ID)
-	if err != nil {
-		s.sendError(client, fmt.Sprintf("agent error: %v", err))
-		return
-	}
 
-	// Save assistant message
-	assistantMsg := &storage.Message{
-		MessageID: generateMessageID(),
-		Content:   response,
-		Role:      "assistant",
-		SessionID: session.ID,
-	}
-	if err := s.repo.CreateMessage(assistantMsg); err != nil {
-		s.sendError(client, fmt.Sprintf("failed to save response: %v", err))
-		return
-	}
+	if msg.Stream {
+		s.handleStreamMessage(ctx, client, agentInstance, msg.Content, session)
+	} else {
+		response, err := agentInstance.ProcessMessage(ctx, msg.Content, session.ID)
+		if err != nil {
+			s.sendError(client, fmt.Sprintf("agent error: %v", err))
+			return
+		}
 
-	// Send response
-	s.sendMessage(client, "message", map[string]interface{}{
-		"content":    response,
-		"message_id": assistantMsg.MessageID,
-		"session_id": session.SessionID,
+		assistantMsg := &storage.Message{
+			MessageID: generateMessageID(),
+			Content:   response,
+			Role:      "assistant",
+			SessionID: session.ID,
+		}
+		if err := s.repo.CreateMessage(assistantMsg); err != nil {
+			s.sendError(client, fmt.Sprintf("failed to save response: %v", err))
+			return
+		}
+
+		s.sendMessage(client, "message", map[string]interface{}{
+			"content":    response,
+			"message_id": assistantMsg.MessageID,
+			"session_id": session.SessionID,
+		})
+	}
+}
+
+func (s *WebSocketServer) handleStreamMessage(ctx context.Context, client *Client, agentInstance *agent.Agent, content string, session *storage.Session) {
+	handler := llm.NewAgentStreamHandler(func(event *llm.AgentStreamEvent) {
+		msg := WSMessage{
+			Type:    "stream_event",
+			Payload: mustMarshalJSON(event),
+		}
+		client.Send <- mustMarshalJSON(msg)
 	})
+
+	req := agent.ExecuteRequest{
+		SessionID:        session.ID,
+		Input:            content,
+		SaveInputMessage: false,
+	}
+
+	if err := agentInstance.ExecuteStream(ctx, req, handler); err != nil {
+		s.sendError(client, fmt.Sprintf("stream error: %v", err))
+		return
+	}
 }
 
 // handleSession handles session-related actions

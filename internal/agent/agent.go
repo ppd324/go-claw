@@ -287,13 +287,10 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 	printColored(_colorCyan, "╚═══════════════════════════════════════════════════════════╝")
 	printColored(_colorGreen, "Total tokens - Input: %d | Output: %d | Tool calls: %d", result.InputTokens, result.OutputTokens, len(result.ToolCalls))
 
-	// Save user message and assistant response
-	// Default behavior: save messages (when SaveInputMessage is not explicitly set to false)
-	if err := a.saveMessages(req.SessionID, req.Input, result.Content, req.SaveInputMessage); err != nil {
+	if _, err := a.saveMessages(req.SessionID, req.Input, result.Content, req.SaveInputMessage); err != nil {
 		slog.Warn("failed to save messages", "session_id", req.SessionID, "error", err)
 	}
 
-	// Save tool calls regardless of SaveMessage flag
 	if len(result.ToolCalls) > 0 {
 		if err := a.saveToolCalls(req.SessionID, result.ToolCalls); err != nil {
 			slog.Warn("failed to save tool calls", "session_id", req.SessionID, "error", err)
@@ -427,6 +424,207 @@ func (a *Agent) ProcessMessageStream(ctx context.Context, content string, sessio
 	return provider.ChatStream(ctx, chatReq, handler)
 }
 
+func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler llm.AgentStreamHandler) error {
+	ctx = context.WithValue(ctx, "session_id", req.SessionID)
+	ctx = context.WithValue(ctx, "agent_id", a.ID)
+
+	provider := a.manager.GetProvider()
+	if provider == nil {
+		err := fmt.Errorf("no llm provider configured")
+		a.markRunError(req, err)
+		handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
+		return err
+	}
+
+	handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeStart})
+
+	messages := make([]llm.Message, 0)
+	if !req.ContextEmpty {
+		history, err := a.getConversationHistory(req.SessionID)
+		if err != nil {
+			a.markRunError(req, err)
+			handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
+			return err
+		}
+		messages = make([]llm.Message, 0, len(history)+1)
+		for _, msg := range history {
+			role := msg.Role
+			if role == "" {
+				role = "user"
+			}
+			messages = append(messages, llm.Message{Role: role, Content: msg.Content})
+		}
+	}
+
+	if req.InputRole == "" {
+		req.InputRole = "user"
+	}
+	messages = append(messages, llm.Message{Role: req.InputRole, Content: req.Input})
+
+	var systemPrompt string
+	if req.SystemPrompt != "" {
+		systemPrompt = req.SystemPrompt
+	} else {
+		systemPrompt = a.systemPrompt()
+	}
+
+	model := a.getModel()
+	toolList := a.toolRegistry.List()
+	if len(req.DisableTools) > 0 {
+		toolList = slices.DeleteFunc(toolList, func(tool *tools.ToolInfo) bool {
+			return slices.Contains(req.DisableTools, tool.Name)
+		})
+	}
+
+	result := &ExecuteResult{}
+
+	for iteration := 0; iteration < MaxToolIterations; iteration++ {
+		handler.OnEvent(&llm.AgentStreamEvent{
+			Type: llm.EventTypeIteration,
+			Data: &llm.IterationEvent{Current: iteration + 1, Max: MaxToolIterations},
+		})
+
+		chatReq := &llm.ChatRequest{
+			Model:        model,
+			SystemPrompt: systemPrompt,
+			Messages:     messages,
+			MaxTokens:    a.manager.cfg.LLMProvider.MaxTokens,
+		}
+		if len(toolList) > 0 {
+			chatReq.Tools = toolList
+		}
+
+		var resp *llm.ChatResponse
+		var streamErr error
+
+		streamHandler := llm.NewStreamHandler(
+			func(content string) {
+				handler.OnEvent(&llm.AgentStreamEvent{
+					Type: llm.EventTypeContent,
+					Data: &llm.ContentEvent{Content: content, Delta: true},
+				})
+			},
+			func(response *llm.ChatResponse) {
+				resp = response
+			},
+			func(err error) {
+				streamErr = err
+			},
+		)
+
+		if err := provider.ChatStream(ctx, chatReq, streamHandler); err != nil {
+			a.markRunError(req, err)
+			handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
+			return err
+		}
+
+		if streamErr != nil {
+			a.markRunError(req, streamErr)
+			handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: streamErr.Error()})
+			return streamErr
+		}
+
+		if resp == nil {
+			err := fmt.Errorf("no response from model")
+			a.markRunError(req, err)
+			handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
+			return err
+		}
+
+		result.InputTokens += resp.InputTokens
+		result.OutputTokens += resp.OutputTokens
+
+		if resp.ReasonContent != "" {
+			handler.OnEvent(&llm.AgentStreamEvent{
+				Type: llm.EventTypeReasoning,
+				Data: &llm.ReasoningEvent{Content: resp.ReasonContent},
+			})
+		}
+
+		if iteration == 0 {
+			result.Content = resp.Content
+		}
+
+		if len(resp.ToolCalls) == 0 {
+			if iteration > 0 {
+				result.Content = resp.Content
+			}
+			break
+		}
+
+		messages = append(messages, llm.Message{Role: "assistant", Content: resp.Content})
+
+		for _, tc := range resp.ToolCalls {
+			handler.OnEvent(&llm.AgentStreamEvent{
+				Type: llm.EventTypeToolCall,
+				Data: &llm.ToolCallEvent{
+					ToolName: tc.Function.Name,
+					Input:    tc.Function.Arguments,
+					CallID:   tc.ID,
+				},
+			})
+		}
+
+		toolResults, err := a.executeToolCalls(ctx, resp.ToolCalls)
+		if err != nil {
+			a.markRunError(req, err)
+			handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
+			return err
+		}
+
+		result.ToolCalls = append(result.ToolCalls, toolResults...)
+
+		for _, tr := range toolResults {
+			handler.OnEvent(&llm.AgentStreamEvent{
+				Type: llm.EventTypeToolResult,
+				Data: &llm.ToolResultEvent{
+					ToolName: tr.ToolName,
+					Output:   tr.Output,
+					Success:  tr.Success,
+				},
+			})
+		}
+
+		for _, tc := range resp.ToolCalls {
+			for _, tr := range toolResults {
+				if tr.ToolName == tc.Function.Name {
+					messages = append(messages, llm.Message{
+						Role:       "tool",
+						Content:    tr.Output,
+						ToolCallID: tc.ID,
+					})
+					break
+				}
+			}
+		}
+	}
+
+	messageID, err := a.saveMessages(req.SessionID, req.Input, result.Content, req.SaveInputMessage)
+	if err != nil {
+		slog.Warn("failed to save messages", "session_id", req.SessionID, "error", err)
+	}
+
+	if len(result.ToolCalls) > 0 {
+		if err := a.saveToolCalls(req.SessionID, result.ToolCalls); err != nil {
+			slog.Warn("failed to save tool calls", "session_id", req.SessionID, "error", err)
+		}
+	}
+
+	a.markRunSuccess(req, result, provider.GetName(), model, len(messages))
+
+	handler.OnEvent(&llm.AgentStreamEvent{
+		Type: llm.EventTypeComplete,
+		Data: &llm.CompleteEvent{
+			Content:      result.Content,
+			InputTokens:  result.InputTokens,
+			OutputTokens: result.OutputTokens,
+			MessageID:    messageID,
+		},
+	})
+
+	return nil
+}
+
 func (a *Agent) AddTool(tool tools.InvokeTool) error {
 	return a.toolRegistry.Register(tool)
 }
@@ -499,28 +697,29 @@ func (a *Agent) getConversationHistory(sessionID uint) ([]storage.Message, error
 	return a.manager.sessionManager.GetMessages(sessionID)
 }
 
-func (a *Agent) saveMessages(sessionID uint, userInput, assistantOutput string, saveInput bool) error {
+func (a *Agent) saveMessages(sessionID uint, userInput, assistantOutput string, saveInput bool) (string, error) {
 	if sessionID == 0 {
-		return nil
+		return "", nil
 	}
 
 	sm := a.manager.sessionManager
 	if sm == nil {
-		return nil
+		return "", nil
 	}
 	if saveInput {
-
 		if _, err := sm.AddMessage(sessionID, "user", userInput); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if assistantOutput != "" {
-		if _, err := sm.AddMessage(sessionID, "assistant", assistantOutput); err != nil {
-			return err
+		msg, err := sm.AddMessage(sessionID, "assistant", assistantOutput)
+		if err != nil {
+			return "", err
 		}
+		return msg.MessageID, nil
 	}
 
-	return nil
+	return "", nil
 }
 
 func (a *Agent) saveToolCalls(sessionID uint, toolCalls []ToolCallResult) error {
