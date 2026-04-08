@@ -25,6 +25,15 @@ type Manager struct {
 	sessionManager *SessionManager
 	skillManager   *skills.Manager
 	workspace      string
+	tempAgents     map[uint]*Agent
+	tempAgentID    uint
+	tempAgentMu    sync.Mutex
+}
+
+type TempAgentOptions struct {
+	Model        string
+	AllowedTools []string
+	Prompt       string
 }
 
 func NewManager(cfg *config.Config, repo *storage.Repository, baseDir string) *Manager {
@@ -66,6 +75,7 @@ func NewManager(cfg *config.Config, repo *storage.Repository, baseDir string) *M
 		sessionManager: sm,
 		skillManager:   skillMgr,
 		workspace:      workspace,
+		tempAgents:     make(map[uint]*Agent),
 	}
 
 	defaultRegistry := tools.NewDefaultToolRegistry(baseDir)
@@ -75,6 +85,8 @@ func NewManager(cfg *config.Config, repo *storage.Repository, baseDir string) *M
 	defaultRegistry.Register(tools.NewUpdateSkillTool(skillMgr))
 	defaultRegistry.Register(tools.NewDeleteSkillTool(skillMgr))
 	m.toolRegistry = defaultRegistry.ToolRegistry
+
+	defaultRegistry.Register(tools.NewSubAgentTool(NewSubAgentAdapter(m)))
 
 	if p, err := llm.NewOpenAIProvider(cfg); err == nil {
 		m.provider = p
@@ -312,4 +324,95 @@ func (m *Manager) ReloadContext() error {
 	}
 
 	return nil
+}
+
+func (m *Manager) CreateTempAgent(opts *TempAgentOptions) (*Agent, func(), error) {
+	m.tempAgentMu.Lock()
+	defer m.tempAgentMu.Unlock()
+
+	m.tempAgentID++
+	id := m.tempAgentID + 100000
+
+	model := opts.Model
+	if model == "" {
+		model = m.cfg.LLMProvider.Model
+	}
+
+	prompt := opts.Prompt
+	if prompt == "" {
+		prompt = `你是一个专注于完成特定任务的 AI 助手。
+
+你的职责：
+- 专注于分配给你的任务
+- 使用可用的工具高效完成任务
+- 提供清晰、结构化的结果
+
+注意事项：
+- 你是一个独立的子 Agent，拥有自己的上下文
+- 完成任务后提供完整的结果报告
+- 如果遇到问题，说明原因并给出建议`
+	}
+
+	profile := &Profile{
+		ID:          id,
+		Name:        fmt.Sprintf("subagent_%d", id),
+		Description: "Temporary sub-agent for task execution",
+		Model:       model,
+		Prompt:      prompt,
+		Status:      "active",
+	}
+
+	agent := &Agent{
+		Profile:      *profile,
+		repo:         m.repo,
+		manager:      m,
+		toolRegistry: m.toolRegistry,
+	}
+
+	if len(opts.AllowedTools) > 0 {
+		filteredRegistry := tools.NewToolRegistry()
+		for _, name := range opts.AllowedTools {
+			if tool, ok := m.toolRegistry.Get(name); ok {
+				filteredRegistry.Register(tool)
+			}
+		}
+		agent.toolRegistry = filteredRegistry
+	} else {
+		filteredRegistry := tools.NewToolRegistry()
+		for _, info := range m.toolRegistry.List() {
+			if info.Name != "subagent" {
+				if tool, ok := m.toolRegistry.Get(info.Name); ok {
+					filteredRegistry.Register(tool)
+				}
+			}
+		}
+		agent.toolRegistry = filteredRegistry
+	}
+
+	m.tempAgents[id] = agent
+
+	cleanup := func() {
+		m.tempAgentMu.Lock()
+		defer m.tempAgentMu.Unlock()
+		delete(m.tempAgents, id)
+	}
+
+	return agent, cleanup, nil
+}
+
+func (m *Manager) GetTempAgent(id uint) (*Agent, bool) {
+	m.tempAgentMu.Lock()
+	defer m.tempAgentMu.Unlock()
+	agent, ok := m.tempAgents[id]
+	return agent, ok
+}
+
+func (m *Manager) ListTempAgents() []*Agent {
+	m.tempAgentMu.Lock()
+	defer m.tempAgentMu.Unlock()
+	agents := make([]*Agent, 0, len(m.tempAgents))
+	for _, a := range m.tempAgents {
+		agents = append(agents, a)
+	}
+	return agents
 }
