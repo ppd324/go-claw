@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -27,6 +28,7 @@ const (
 )
 
 type ContextManager struct {
+	mu           sync.RWMutex
 	workspace    string
 	files        map[WorkspaceFile]string
 	skillManager *skills.Manager
@@ -51,6 +53,7 @@ type EnvironmentInfo struct {
 	OS          string
 	Arch        string
 	WorkDir     string
+	Timestamp   string
 	CurrentTime string
 	Date        string
 	Timezone    string
@@ -86,6 +89,8 @@ func (cm *ContextManager) SetSkillManager(sm *skills.Manager) {
 }
 
 func (cm *ContextManager) Load() error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	files := []WorkspaceFile{FileSOUL, FileUSER, FileMEMORY, FileIDENTITY, FileAGENTS, FileBOOT, FileHEARTBEAT, FileSKILLS}
 	for _, f := range files {
 		path := filepath.Join(cm.workspace, string(f))
@@ -97,13 +102,20 @@ func (cm *ContextManager) Load() error {
 }
 
 func (cm *ContextManager) Get(f WorkspaceFile) string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 	return cm.files[f]
 }
 
 func (cm *ContextManager) Set(f WorkspaceFile, content string) error {
-	cm.files[f] = content
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	path := filepath.Join(cm.workspace, string(f))
-	return os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return err
+	}
+	cm.files[f] = content
+	return nil
 }
 
 func (cm *ContextManager) GetEnvironmentInfo() *EnvironmentInfo {
@@ -126,7 +138,8 @@ func (cm *ContextManager) GetEnvironmentInfo() *EnvironmentInfo {
 		shellHint = `IMPORTANT: You are running on Windows. When using command-line tools:
 - Use PowerShell/CMD commands (e.g., dir, type, copy, del, move)
 - Use backslashes \ for paths
-- Use "cmd /C" for shell commands
+- When using the exec tool, do NOT prepend "cmd /C" because the tool already handles shell execution
+- Prefer structured exec calls with program + args for Python/script paths that include backslashes or quotes
 - Do NOT use Unix commands like ls, cat, rm, cp, mv`
 	case "darwin":
 		shellHint = `IMPORTANT: You are running on macOS. When using command-line tools:
@@ -145,6 +158,7 @@ func (cm *ContextManager) GetEnvironmentInfo() *EnvironmentInfo {
 		OS:          runtime.GOOS,
 		Arch:        runtime.GOARCH,
 		WorkDir:     cm.workspace,
+		Timestamp:   now.Format(time.RFC3339),
 		CurrentTime: now.Format("15:04:05"),
 		Date:        now.Format("2006-01-02"),
 		Timezone:    tzName,
@@ -157,43 +171,66 @@ func (cm *ContextManager) GetEnvironmentInfo() *EnvironmentInfo {
 func (cm *ContextManager) BuildSystemPrompt() string {
 	var sb strings.Builder
 
-	if identity := cm.Get(FileIDENTITY); identity != "" {
-		sb.WriteString("## Identity\n")
-		sb.WriteString(identity)
-		sb.WriteString("\n\n")
+	identity := sectionContent(cm.Get(FileIDENTITY), "Identity")
+	if identity == "" || strings.Contains(identity, "{{.Name}}") {
+		identity = "You are go-claw agent, a capable AI assistant working in the user's local workspace. Be accurate, practical, and concise; use available tools when they materially improve the result."
 	}
+	sb.WriteString("## Identity\n")
+	sb.WriteString(identity)
+	sb.WriteString("\n\n")
 
-	if soul := cm.Get(FileSOUL); soul != "" {
-		sb.WriteString("## Soul\n")
-		sb.WriteString(soul)
-		sb.WriteString("\n\n")
+	soul := sectionContent(cm.Get(FileSOUL), "Soul")
+	if soul == "" {
+		soul = "Help the user complete their goals safely and reliably. Prefer concrete actions and verified results over speculation. Preserve the user's existing work and clearly report uncertainty or blockers."
 	}
+	sb.WriteString("## Operating Principles\n")
+	sb.WriteString(soul)
+	sb.WriteString("\n\n")
 
-	if user := cm.Get(FileUSER); user != "" {
+	env := cm.GetEnvironmentInfo()
+	sb.WriteString("## Runtime Environment\n")
+	sb.WriteString(fmt.Sprintf("- Current timestamp: %s\n", env.Timestamp))
+	sb.WriteString(fmt.Sprintf("- Local date: %s\n", env.Date))
+	sb.WriteString(fmt.Sprintf("- Local time: %s\n", env.CurrentTime))
+	sb.WriteString(fmt.Sprintf("- Timezone: %s\n", env.Timezone))
+	sb.WriteString(fmt.Sprintf("- Operating system: %s\n", env.OS))
+	sb.WriteString(fmt.Sprintf("- Architecture: %s\n", env.Arch))
+	sb.WriteString(fmt.Sprintf("- Working directory: %s\n", env.WorkDir))
+	if env.Hostname != "" {
+		sb.WriteString(fmt.Sprintf("- Hostname: %s\n", env.Hostname))
+	}
+	if env.Username != "" {
+		sb.WriteString(fmt.Sprintf("- OS user: %s\n", env.Username))
+	}
+	sb.WriteString("\n### Shell Guidance\n")
+	sb.WriteString(env.ShellHint)
+	sb.WriteString("\n\n")
+
+	if user := sectionContent(cm.Get(FileUSER), "User", "User Information"); user != "" {
 		sb.WriteString("## User Information\n")
 		sb.WriteString(user)
 		sb.WriteString("\n\n")
 	}
 
-	if memory := cm.Get(FileMEMORY); memory != "" {
+	if memory := sectionContent(cm.Get(FileMEMORY), "Memory"); memory != "" {
 		sb.WriteString("## Memory\n")
 		sb.WriteString(memory)
 		sb.WriteString("\n\n")
 	}
 
-	if agents := cm.Get(FileAGENTS); agents != "" {
+	if agents := sectionContent(cm.Get(FileAGENTS), "Agents", "Agent Routing"); agents != "" {
 		sb.WriteString("## Agent Routing\n")
 		sb.WriteString(agents)
 		sb.WriteString("\n\n")
 	}
 
-	if boot := cm.Get(FileBOOT); boot != "" {
+	if boot := sectionContent(cm.Get(FileBOOT), "Boot", "Boot Instructions"); boot != "" {
 		sb.WriteString("## Boot Instructions\n")
 		sb.WriteString(boot)
 		sb.WriteString("\n\n")
 	}
 
-	if heartbeat := cm.Get(FileHEARTBEAT); heartbeat != "" {
+	if heartbeat := sectionContent(cm.Get(FileHEARTBEAT), "Heartbeat", "Daily Checklist"); heartbeat != "" {
 		sb.WriteString("## Daily Checklist\n")
 		sb.WriteString(heartbeat)
 		sb.WriteString("\n\n")
@@ -205,6 +242,30 @@ func (cm *ContextManager) BuildSystemPrompt() string {
 	}
 
 	return sb.String()
+}
+
+// sectionContent removes a redundant top-level heading and treats heading-only
+// workspace files as empty. Workspace files remain user-editable raw Markdown.
+func sectionContent(content string, headings ...string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 {
+		first := strings.TrimSpace(lines[0])
+		for _, heading := range headings {
+			if strings.EqualFold(first, "# "+heading) || strings.EqualFold(first, "## "+heading) {
+				lines = lines[1:]
+				break
+			}
+		}
+	}
+	content = strings.TrimSpace(strings.Join(lines, "\n"))
+	if content == "" {
+		return ""
+	}
+	return content
 }
 
 func (cm *ContextManager) BuildSkillsPrompt() string {
@@ -227,21 +288,56 @@ func (cm *ContextManager) BuildSkillsPrompt() string {
 		sb.WriteString(fmt.Sprintf("<name>%s</name>\n", skill.Name))
 		sb.WriteString(fmt.Sprintf("<command>%s</command>\n", skill.Command))
 		sb.WriteString(fmt.Sprintf("<description>%s</description>\n", skill.Description))
-		if skill.Source != "" {
-			sb.WriteString(fmt.Sprintf("<location>%s/SKILL.md</location>\n", skill.Source))
+		if skill.EntryFile != "" {
+			sb.WriteString(fmt.Sprintf("<entry_file>%s</entry_file>\n", skill.EntryFile))
+		} else if skill.Source != "" {
+			sb.WriteString(fmt.Sprintf("<entry_file>%s</entry_file>\n", filepath.Join(skill.Source, "SKILL.md")))
 		}
+		if skill.Interface != nil {
+			sb.WriteString("<interface>\n")
+			if skill.Interface.DisplayName != "" {
+				sb.WriteString(fmt.Sprintf("<display_name>%s</display_name>\n", skill.Interface.DisplayName))
+			}
+			if skill.Interface.ShortDescription != "" {
+				sb.WriteString(fmt.Sprintf("<short_description>%s</short_description>\n", skill.Interface.ShortDescription))
+			}
+			if skill.Interface.Source != "" {
+				sb.WriteString(fmt.Sprintf("<source>%s</source>\n", skill.Interface.Source))
+			}
+			sb.WriteString("</interface>\n")
+		}
+		appendSkillResourcePrompt(&sb, "agent_configs", skill.AgentConfigs, 4)
+		appendSkillResourcePrompt(&sb, "scripts", skill.Scripts, 8)
+		appendSkillResourcePrompt(&sb, "references", skill.References, 8)
+		appendSkillResourcePrompt(&sb, "assets", skill.Assets, 4)
 		sb.WriteString(fmt.Sprintf("</skill>\n"))
 	}
 
 	sb.WriteString("</available_skills>\n\n")
 	sb.WriteString("**How to use skills:**\n")
-	sb.WriteString("1. When the user's request matches a skill's description, use the `read` tool to load the SKILL.md file from the skill's location\n")
-	sb.WriteString("2. Read and follow the instructions in the SKILL.md file\n")
-	sb.WriteString("3. Execute the skill's workflow step by step\n")
-	sb.WriteString("4. You can also directly invoke a skill by mentioning its command (e.g., `/天气`)\n\n")
-	sb.WriteString("**Important:** Do NOT load all skills at once. Only load the skill that is relevant to the current task.\n")
+	sb.WriteString("1. When the user's request matches a skill, call `get_skill` with its command to load the full instructions and resource manifest\n")
+	sb.WriteString("2. Prefer `read_file` on the exact resource paths listed for that skill instead of searching the whole workspace\n")
+	sb.WriteString("3. If a skill exposes scripts, inspect those listed scripts first before exploring unrelated files\n")
+	sb.WriteString("4. You can also directly invoke a skill by mentioning its command (for example `/claude-code-bridge`)\n\n")
+	sb.WriteString("**Important:** Do NOT load all skills at once. Only inspect the one skill that is relevant to the current task.\n")
 
 	return sb.String()
+}
+
+func appendSkillResourcePrompt(sb *strings.Builder, tag string, resources []skills.SkillResource, limit int) {
+	if len(resources) == 0 {
+		return
+	}
+
+	sb.WriteString(fmt.Sprintf("<%s count=\"%d\">\n", tag, len(resources)))
+	for idx, resource := range resources {
+		if limit > 0 && idx >= limit {
+			sb.WriteString(fmt.Sprintf("<more>%d more</more>\n", len(resources)-limit))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("<file path=\"%s\">%s</file>\n", resource.Path, resource.AbsPath))
+	}
+	sb.WriteString(fmt.Sprintf("</%s>\n", tag))
 }
 
 func (cm *ContextManager) BuildPrompt(req *ExecuteRequest, history string, extraSystem string) string {
@@ -347,8 +443,8 @@ func (cm *ContextManager) ListFiles() []string {
 func EnsureWorkspace(workspace string) error {
 	files := []WorkspaceFile{FileSOUL, FileUSER, FileMEMORY, FileIDENTITY, FileAGENTS, FileBOOT, FileHEARTBEAT}
 	defaults := map[WorkspaceFile]string{
-		FileIDENTITY:  "# Identity\n\nYour name is {{.Name}}.\n",
-		FileSOUL:      "# Soul\n\nYou are a helpful AI assistant.\n",
+		FileIDENTITY:  "# Identity\n\nYou are go-claw agent.\n",
+		FileSOUL:      "# Soul\n\nHelp the user complete their goals safely and reliably.\n",
 		FileUSER:      "# User\n\n",
 		FileMEMORY:    "# Memory\n\n",
 		FileAGENTS:    "# Agents\n\n",

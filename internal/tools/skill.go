@@ -13,113 +13,113 @@ type CreateSkillTool struct {
 	manager *skills.Manager
 }
 
-func NewCreateSkillTool(manager *skills.Manager) *CreateSkillTool {
-	return &CreateSkillTool{manager: manager}
-}
-
-func (t *CreateSkillTool) Info(ctx context.Context) (*ToolInfo, error) {
-	return &ToolInfo{
-		Name:        "create_skill",
-		Description: "Create a new skill that defines a reusable workflow or capability. Skills are triggered by slash commands and contain instructions for the AI to follow.",
-		Parameters: ToolParameters{
-			Type: Object,
-			Properties: map[string]ToolParameter{
-				"name": {
-					Type:        String,
-					Description: "The name of the skill (e.g., 'deploy', 'review-pr', 'summarize')",
-				},
-				"command": {
-					Type:        String,
-					Description: "The slash command to trigger the skill (e.g., '/deploy', '/review'). If not provided, will be auto-generated from name",
-				},
-				"description": {
-					Type:        String,
-					Description: "A brief description of what this skill does",
-				},
-				"instructions": {
-					Type:        String,
-					Description: "Detailed instructions for the AI to follow when this skill is triggered. Be specific about the steps and expected output",
-				},
-				"tools": {
-					Type:        Array,
-					Description: "List of tool names that this skill requires (e.g., ['execute_command', 'read_file', 'write_file'])",
-				},
-				"category": {
-					Type:        String,
-					Description: "Category for organizing skills (e.g., 'deployment', 'code-review', 'documentation')",
-				},
-				"tags": {
-					Type:        Array,
-					Description: "Tags for filtering and searching skills",
-				},
-				"examples": {
-					Type:        Array,
-					Description: "Example usages of this skill",
-				},
-			},
-			Required: []string{"name", "description", "instructions"},
-		},
-	}, nil
-}
-
-func (t *CreateSkillTool) Invoke(ctx context.Context, params json.RawMessage, opt ...Option) (*ToolResult, error) {
-	var p struct {
-		Name         string   `json:"name"`
-		Command      string   `json:"command"`
-		Description  string   `json:"description"`
-		Instructions string   `json:"instructions"`
-		Tools        []string `json:"tools"`
-		Category     string   `json:"category"`
-		Tags         []string `json:"tags"`
-		Examples     []string `json:"examples"`
-	}
-
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("failed to parse parameters: %w", err)
-	}
-
-	if p.Name == "" {
-		return nil, fmt.Errorf("name is required")
-	}
-	if p.Description == "" {
-		return nil, fmt.Errorf("description is required")
-	}
-	if p.Instructions == "" {
-		return nil, fmt.Errorf("instructions is required")
-	}
-
-	command := p.Command
-	if command == "" {
-		command = "/" + strings.ToLower(strings.ReplaceAll(p.Name, " ", "-"))
-	}
-
-	skill, err := t.manager.Create(p.Name, command, p.Description, p.Instructions)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(p.Tools) > 0 {
-		skill.Tools = p.Tools
-	}
-	if p.Category != "" {
-		skill.Category = p.Category
-	}
-	if len(p.Tags) > 0 {
-		skill.Tags = p.Tags
-	}
-	if len(p.Examples) > 0 {
-		skill.Examples = p.Examples
-	}
-
-	if err := t.manager.Update(skill); err != nil {
-		return nil, err
-	}
-
-	return &ToolResult{
-		Text: fmt.Sprintf("Successfully created skill '%s' with command '%s'\n\nDescription: %s\n\nThe skill is now available. Users can trigger it by typing: %s",
-			skill.Name, skill.Command, skill.Description, skill.Command),
-	}, nil
-}
+//func NewCreateSkillTool(manager *skills.Manager) *CreateSkillTool {
+//	return &CreateSkillTool{manager: manager}
+//}
+//
+//func (t *CreateSkillTool) Info(ctx context.Context) (*ToolInfo, error) {
+//	return &ToolInfo{
+//		Name:        "create_skill",
+//		Description: "Create a new skill that defines a reusable workflow or capability. Skills are triggered by slash commands and contain instructions for the AI to follow.",
+//		Parameters: ToolParameters{
+//			Type: Object,
+//			Properties: map[string]ToolParameter{
+//				"name": {
+//					Type:        String,
+//					Description: "The name of the skill (e.g., 'deploy', 'review-pr', 'summarize')",
+//				},
+//				"command": {
+//					Type:        String,
+//					Description: "The slash command to trigger the skill (e.g., '/deploy', '/review'). If not provided, will be auto-generated from name",
+//				},
+//				"description": {
+//					Type:        String,
+//					Description: "A brief description of what this skill does",
+//				},
+//				"instructions": {
+//					Type:        String,
+//					Description: "Detailed instructions for the AI to follow when this skill is triggered. Be specific about the steps and expected output",
+//				},
+//				"tools": {
+//					Type:        Array,
+//					Description: "List of tool names that this skill requires (e.g., ['execute_command', 'read_file', 'write_file'])",
+//				},
+//				"category": {
+//					Type:        String,
+//					Description: "Category for organizing skills (e.g., 'deployment', 'code-review', 'documentation')",
+//				},
+//				"tags": {
+//					Type:        Array,
+//					Description: "Tags for filtering and searching skills",
+//				},
+//				"examples": {
+//					Type:        Array,
+//					Description: "Example usages of this skill",
+//				},
+//			},
+//			Required: []string{"name", "description", "instructions"},
+//		},
+//	}, nil
+//}
+//
+//func (t *CreateSkillTool) Invoke(ctx context.Context, params json.RawMessage, opt ...Option) (*ToolResult, error) {
+//	var p struct {
+//		Name         string   `json:"name"`
+//		Command      string   `json:"command"`
+//		Description  string   `json:"description"`
+//		Instructions string   `json:"instructions"`
+//		Tools        []string `json:"tools"`
+//		Category     string   `json:"category"`
+//		Tags         []string `json:"tags"`
+//		Examples     []string `json:"examples"`
+//	}
+//
+//	if err := json.Unmarshal(params, &p); err != nil {
+//		return nil, fmt.Errorf("failed to parse parameters: %w", err)
+//	}
+//
+//	if p.Name == "" {
+//		return nil, fmt.Errorf("name is required")
+//	}
+//	if p.Description == "" {
+//		return nil, fmt.Errorf("description is required")
+//	}
+//	if p.Instructions == "" {
+//		return nil, fmt.Errorf("instructions is required")
+//	}
+//
+//	command := p.Command
+//	if command == "" {
+//		command = "/" + strings.ToLower(strings.ReplaceAll(p.Name, " ", "-"))
+//	}
+//
+//	skill, err := t.manager.Create(p.Name, command, p.Description, p.Instructions)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	if len(p.Tools) > 0 {
+//		skill.Tools = p.Tools
+//	}
+//	if p.Category != "" {
+//		skill.Category = p.Category
+//	}
+//	if len(p.Tags) > 0 {
+//		skill.Tags = p.Tags
+//	}
+//	if len(p.Examples) > 0 {
+//		skill.Examples = p.Examples
+//	}
+//
+//	if err := t.manager.Update(skill); err != nil {
+//		return nil, err
+//	}
+//
+//	return &ToolResult{
+//		Text: fmt.Sprintf("Successfully created skill '%s' with command '%s'\n\nDescription: %s\n\nThe skill is now available. Users can trigger it by typing: %s",
+//			skill.Name, skill.Command, skill.Description, skill.Command),
+//	}, nil
+//}
 
 type ListSkillsTool struct {
 	manager *skills.Manager
@@ -156,6 +156,10 @@ func (t *ListSkillsTool) Invoke(ctx context.Context, params json.RawMessage, opt
 		if skill.Category != "" {
 			sb.WriteString(fmt.Sprintf("  Category: %s\n", skill.Category))
 		}
+		resourceCount := len(skill.AgentConfigs) + len(skill.Scripts) + len(skill.References) + len(skill.Assets)
+		if resourceCount > 0 {
+			sb.WriteString(fmt.Sprintf("  Resources: %d file(s)\n", resourceCount))
+		}
 		sb.WriteString("\n")
 	}
 
@@ -177,9 +181,9 @@ func (t *GetSkillTool) Info(ctx context.Context) (*ToolInfo, error) {
 		Parameters: ToolParameters{
 			Type: Object,
 			Properties: map[string]ToolParameter{
-				"command": {
+				"name": {
 					Type:        String,
-					Description: "The command of the skill to retrieve (e.g., '/deploy')",
+					Description: "The name of the skill to retrieve (e.g., 'deploy')",
 				},
 			},
 			Required: []string{"command"},
@@ -189,16 +193,16 @@ func (t *GetSkillTool) Info(ctx context.Context) (*ToolInfo, error) {
 
 func (t *GetSkillTool) Invoke(ctx context.Context, params json.RawMessage, opt ...Option) (*ToolResult, error) {
 	var p struct {
-		Command string `json:"command"`
+		Name string `json:"name"`
 	}
 
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("failed to parse parameters: %w", err)
 	}
 
-	skill, ok := t.manager.Get(p.Command)
+	skill, ok := t.manager.Get(p.Name)
 	if !ok {
-		return nil, fmt.Errorf("skill not found: %s", p.Command)
+		return nil, fmt.Errorf("skill not found: %s", p.Name)
 	}
 
 	var sb strings.Builder
@@ -233,10 +237,50 @@ func (t *GetSkillTool) Invoke(ctx context.Context, params json.RawMessage, opt .
 		sb.WriteString("\n")
 	}
 
+	if skill.Source != "" {
+		sb.WriteString(fmt.Sprintf("**Skill Root:** %s\n\n", skill.Source))
+	}
+	if skill.EntryFile != "" {
+		sb.WriteString(fmt.Sprintf("**Entry File:** %s\n\n", skill.EntryFile))
+	}
+	if skill.Interface != nil {
+		sb.WriteString("**Interface Metadata:**\n")
+		if skill.Interface.DisplayName != "" {
+			sb.WriteString(fmt.Sprintf("- Display Name: %s\n", skill.Interface.DisplayName))
+		}
+		if skill.Interface.ShortDescription != "" {
+			sb.WriteString(fmt.Sprintf("- Short Description: %s\n", skill.Interface.ShortDescription))
+		}
+		if skill.Interface.DefaultPrompt != "" {
+			sb.WriteString(fmt.Sprintf("- Default Prompt: %s\n", skill.Interface.DefaultPrompt))
+		}
+		if skill.Interface.Source != "" {
+			sb.WriteString(fmt.Sprintf("- Source: %s\n", skill.Interface.Source))
+		}
+		sb.WriteString("\n")
+	}
+
+	appendSkillResourceDetails(&sb, "Agent Config Files", skill.AgentConfigs)
+	appendSkillResourceDetails(&sb, "Scripts", skill.Scripts)
+	appendSkillResourceDetails(&sb, "References", skill.References)
+	appendSkillResourceDetails(&sb, "Assets", skill.Assets)
+
 	sb.WriteString("**Instructions:**\n")
 	sb.WriteString(skill.Instructions)
 
 	return &ToolResult{Text: sb.String()}, nil
+}
+
+func appendSkillResourceDetails(sb *strings.Builder, title string, resources []skills.SkillResource) {
+	if len(resources) == 0 {
+		return
+	}
+
+	sb.WriteString(fmt.Sprintf("**%s:**\n", title))
+	for _, resource := range resources {
+		sb.WriteString(fmt.Sprintf("- %s\n", resource.AbsPath))
+	}
+	sb.WriteString("\n")
 }
 
 type UpdateSkillTool struct {

@@ -48,6 +48,7 @@ type Message struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"tool_call,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type StreamHandler interface {
@@ -121,16 +122,25 @@ type ToolCallEvent struct {
 }
 
 type ToolResultEvent struct {
+	CallID   string `json:"call_id"`
 	ToolName string `json:"tool_name"`
 	Output   string `json:"output"`
 	Success  bool   `json:"success"`
 }
 
 type CompleteEvent struct {
-	Content      string `json:"content"`
-	InputTokens  int    `json:"input_tokens"`
-	OutputTokens int    `json:"output_tokens"`
-	MessageID    string `json:"message_id,omitempty"`
+	Content      string       `json:"content"`
+	InputTokens  int          `json:"input_tokens"`
+	OutputTokens int          `json:"output_tokens"`
+	MessageID    string       `json:"message_id,omitempty"`
+	ContextUsage ContextUsage `json:"context_usage"`
+}
+
+type ContextUsage struct {
+	UsedTokens   int     `json:"used_tokens"`
+	WindowTokens int     `json:"window_tokens"`
+	Percent      float64 `json:"percent"`
+	Estimated    bool    `json:"estimated"`
 }
 
 type IterationEvent struct {

@@ -21,7 +21,7 @@ type InvokeTool interface {
 type ToolInfo struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
-	Parameters  ToolParameters `json:"parameters"`
+	Parameters  ToolParameters `json:"parameters,omitempty"`
 }
 
 type ToolResult struct {
@@ -40,14 +40,14 @@ const (
 )
 
 type ToolParameters struct {
-	Type       ParameterType            `json:"type"`
-	Properties map[string]ToolParameter `json:"properties"`
-	Required   []string                 `json:"required"`
+	Type       ParameterType            `json:"type,omitempty"`
+	Properties map[string]ToolParameter `json:"properties,omitempty"`
+	Required   []string                 `json:"required,omitempty"`
 }
 
 type ToolParameter struct {
-	Type        ParameterType `json:"type"`
-	Description string        `json:"description"`
-	Default     any           `json:"default"`
-	Enum        []any         `json:"enum"`
+	Type        ParameterType `json:"type,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Default     any           `json:"default,omitempty"`
+	Enum        []any         `json:"enum,omitempty"`
 }

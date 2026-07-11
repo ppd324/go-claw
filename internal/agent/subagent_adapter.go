@@ -39,9 +39,11 @@ type SubAgentInstanceAdapter struct {
 
 func (a *SubAgentInstanceAdapter) Execute(ctx context.Context, input string) (string, int, int, error) {
 	result, err := a.agent.Execute(ctx, ExecuteRequest{
-		Input:            input,
-		SaveInputMessage: false,
-		ContextEmpty:     true,
+		Input:                  input,
+		SaveInputMessage:       false,
+		ContextEmpty:           true,
+		SkipMemoryExtraction:   true,
+		SkipContextCompression: true,
 	})
 	if err != nil {
 		return "", 0, 0, err

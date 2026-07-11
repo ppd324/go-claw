@@ -45,7 +45,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 
 	payload := map[string]interface{}{
 		"model":    model,
-		"messages": req.Messages,
+		"messages": messagesWithSystemPrompt(req),
 	}
 
 	if req.Temperature > 0 {
@@ -68,6 +68,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	}
 
 	body, _ := json.Marshal(payload)
+	fmt.Println(string(body))
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST",
 		p.baseUrl+"/chat/completions", bytes.NewReader(body))
@@ -155,7 +156,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest, handl
 
 	payload := map[string]interface{}{
 		"model":    model,
-		"messages": req.Messages,
+		"messages": messagesWithSystemPrompt(req),
 		"stream":   true,
 	}
 
@@ -351,6 +352,16 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest, handl
 	})
 
 	return nil
+}
+
+func messagesWithSystemPrompt(req *ChatRequest) []Message {
+	if req.SystemPrompt == "" {
+		return req.Messages
+	}
+	messages := make([]Message, 0, len(req.Messages)+1)
+	messages = append(messages, Message{Role: "system", Content: req.SystemPrompt})
+	messages = append(messages, req.Messages...)
+	return messages
 }
 
 func (p *OpenAIProvider) GetName() string {

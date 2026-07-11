@@ -15,12 +15,30 @@ type Config struct {
 	Database    DatabaseConfig    `mapstructure:"database"`
 	LLMProvider LLMProviderConfig `mapstructure:"llm_provider"`
 	Skills      SkillsConfig      `mapstructure:"skills"`
+	Memory      MemoryConfig      `mapstructure:"memory"`
+	Context     ContextConfig     `mapstructure:"context"`
 	Telegram    TelegramConfig    `mapstructure:"telegram"`
 	Discord     DiscordConfig     `mapstructure:"discord"`
 	Feishu      FeishuConfig      `mapstructure:"feishu"`
 	Voice       VoiceConfig       `mapstructure:"voice"`
 	Log         LogConfig         `mapstructure:"log"`
 	WorkDir     string            `mapstructure:"work_dir"`
+}
+
+type MemoryConfig struct {
+	Enabled       bool          `mapstructure:"enabled"`
+	Model         string        `mapstructure:"model"`
+	Timeout       time.Duration `mapstructure:"timeout"`
+	MaxInputChars int           `mapstructure:"max_input_chars"`
+}
+
+type ContextConfig struct {
+	Enabled            bool `mapstructure:"enabled"`
+	WindowTokens       int  `mapstructure:"window_tokens"`
+	RecentTurns        int  `mapstructure:"recent_turns"`
+	ToolResultMaxBytes int  `mapstructure:"tool_result_max_bytes"`
+	CompactThreshold   int  `mapstructure:"compact_threshold_percent"`
+	SummaryThreshold   int  `mapstructure:"summary_threshold_percent"`
 }
 
 type ServerConfig struct {
@@ -130,9 +148,17 @@ func Load() (*Config, error) {
 	viper.SetDefault("llm_provider.api_key", "")
 	viper.SetDefault("llm_provider.temperature", 0.2)
 
-	viper.SetDefault("skills.directory", "./skills")
 	viper.SetDefault("skills.max_injected_skills", 3)
 	viper.SetDefault("skills.max_injection_chars", 4000)
+	viper.SetDefault("memory.enabled", true)
+	viper.SetDefault("memory.timeout", 120*time.Second)
+	viper.SetDefault("memory.max_input_chars", 50000)
+	viper.SetDefault("context.enabled", true)
+	viper.SetDefault("context.window_tokens", 200000)
+	viper.SetDefault("context.recent_turns", 10)
+	viper.SetDefault("context.tool_result_max_bytes", 500)
+	viper.SetDefault("context.compact_threshold_percent", 50)
+	viper.SetDefault("context.summary_threshold_percent", 90)
 
 	viper.SetDefault("log.level", "info")
 	viper.SetDefault("log.format", "console")
@@ -171,6 +197,7 @@ func Load() (*Config, error) {
 
 	// If config file doesn't exist, create a default one
 	if configNotFound {
+		slog.Warn("failed to load config")
 		if err := createDefaultConfig(); err != nil {
 			fmt.Printf("Warning: failed to create default config: %v\n", err)
 		} else {
@@ -214,9 +241,18 @@ func createDefaultConfig() error {
 	viper.Set("llm_provider.max_tokens", 200000)
 	viper.Set("llm_provider.timeout", 120)
 	viper.Set("llm_provider.temperature", 0.2)
-	viper.Set("skills.directory", "./skills")
 	viper.Set("skills.max_injected_skills", 3)
 	viper.Set("skills.max_injection_chars", 4000)
+	viper.Set("memory.enabled", true)
+	viper.Set("memory.model", "")
+	viper.Set("memory.timeout", "120s")
+	viper.Set("memory.max_input_chars", 50000)
+	viper.Set("context.enabled", true)
+	viper.Set("context.window_tokens", 200000)
+	viper.Set("context.recent_turns", 10)
+	viper.Set("context.tool_result_max_bytes", 500)
+	viper.Set("context.compact_threshold_percent", 50)
+	viper.Set("context.summary_threshold_percent", 90)
 	viper.Set("work_dir", filepath.ToSlash(filepath.Join(homeDir, ".go-claw")))
 	viper.Set("telegram.enabled", false)
 	viper.Set("telegram.bot_token", "")

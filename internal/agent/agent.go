@@ -82,6 +82,12 @@ type ExecuteRequest struct {
 	//禁用工具
 	DisableTools []string
 	ContextEmpty bool
+	// SkipMemoryExtraction prevents internal agents (especially the memory agent)
+	// from recursively spawning another memory extraction run.
+	SkipMemoryExtraction bool
+	// SkipContextCompression prevents internal temporary agents from entering
+	// the persistent session compaction pipeline.
+	SkipContextCompression bool
 }
 
 type ExecuteResult struct {
@@ -90,6 +96,7 @@ type ExecuteResult struct {
 	OutputTokens int              `json:"output_tokens"`
 	StopReason   string           `json:"stop_reason,omitempty"`
 	ToolCalls    []ToolCallResult `json:"tool_calls,omitempty"`
+	ContextUsage llm.ContextUsage `json:"context_usage"`
 }
 
 type ExecutionMode string
@@ -100,6 +107,7 @@ const (
 )
 
 type ToolCallResult struct {
+	CallID   string `json:"call_id"`
 	ToolName string `json:"tool_name"`
 	Input    string `json:"input"`
 	Output   string `json:"output"`
@@ -131,28 +139,19 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		a.markRunError(req, err)
 		return nil, err
 	}
-	messages := make([]llm.Message, 0)
-	if !req.ContextEmpty {
-		history, err := a.getConversationHistory(req.SessionID)
-		if err != nil {
-			a.markRunError(req, err)
-			return nil, err
-		}
-
-		printColored(_colorGray, "Loaded %d historical messages", len(history))
-
-		messages = make([]llm.Message, 0, len(history)+1)
-		for _, msg := range history {
-			role := msg.Role
-			if role == "" {
-				role = "user"
-			}
-			messages = append(messages, llm.Message{
-				Role:    role,
-				Content: msg.Content,
-			})
-		}
+	var systemPrompt string
+	if req.SystemPrompt != "" {
+		systemPrompt = req.SystemPrompt
+	} else {
+		systemPrompt = a.systemPrompt()
 	}
+	messages, err := a.prepareConversationContext(ctx, req, systemPrompt)
+	if err != nil {
+		a.markRunError(req, err)
+		return nil, err
+	}
+	printColored(_colorGray, "Loaded %d historical context messages", len(messages))
+	turnStart := len(messages)
 	if req.InputRole == "" {
 		req.InputRole = "user"
 	}
@@ -160,15 +159,6 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		Role:    req.InputRole,
 		Content: req.Input,
 	})
-
-	var systemPrompt string
-	if req.SystemPrompt != "" {
-		systemPrompt = req.SystemPrompt
-	} else {
-		systemPrompt = a.systemPrompt()
-	}
-	fmt.Println(systemPrompt)
-
 	model := a.getModel()
 	toolList := a.toolRegistry.List()
 	if len(req.DisableTools) > 0 {
@@ -178,6 +168,7 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 	}
 
 	result := &ExecuteResult{}
+	var lastInputTokens, lastOutputTokens int
 
 	printColored(_colorBold, "Starting execution loop (max iterations: %d)", MaxToolIterations)
 
@@ -205,6 +196,7 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 
 		result.InputTokens += resp.InputTokens
 		result.OutputTokens += resp.OutputTokens
+		lastInputTokens, lastOutputTokens = resp.InputTokens, resp.OutputTokens
 
 		printColored(_colorGreen, "Model response received | Input tokens: %d | Output tokens: %d", resp.InputTokens, resp.OutputTokens)
 
@@ -231,8 +223,9 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 		printColored(_colorBold, "Found %d tool call(s), executing...", len(resp.ToolCalls))
 
 		messages = append(messages, llm.Message{
-			Role:    "assistant",
-			Content: resp.Content,
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
 		})
 
 		// Print tool call details
@@ -268,7 +261,7 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 
 		for _, tc := range resp.ToolCalls {
 			for _, tr := range toolResults {
-				if tr.ToolName == tc.Function.Name {
+				if tr.CallID == tc.ID {
 					messages = append(messages, llm.Message{
 						Role:       "tool",
 						Content:    tr.Output,
@@ -296,8 +289,11 @@ func (a *Agent) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult
 			slog.Warn("failed to save tool calls", "session_id", req.SessionID, "error", err)
 		}
 	}
+	result.ContextUsage = a.calculateContextUsage(systemPrompt, messages, result.Content, toolList, lastInputTokens, lastOutputTokens)
+	a.persistContextTurn(req.SessionID, messages[turnStart:], result.Content)
 
 	a.markRunSuccess(req, result, provider.GetName(), model, len(messages))
+	a.scheduleMemoryExtraction(req, result)
 	return result, nil
 }
 
@@ -312,6 +308,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []llm.ToolCall) 
 
 	for _, tc := range toolCalls {
 		result := ToolCallResult{
+			CallID:   tc.ID,
 			ToolName: tc.Function.Name,
 			Input:    tc.Function.Arguments,
 		}
@@ -428,6 +425,11 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 	ctx = context.WithValue(ctx, "session_id", req.SessionID)
 	ctx = context.WithValue(ctx, "agent_id", a.ID)
 
+	printColored(_colorCyan, "╔═══════════════════════════════════════════════════════════╗")
+	printColored(_colorCyan, "║          AGENT STREAM EXECUTION STARTING                ║")
+	printColored(_colorCyan, "╚═══════════════════════════════════════════════════════════╝")
+	printColored(_colorBold, "Agent: %s (ID: %d) | Session: %s", a.Name, a.ID, req.SessionID)
+
 	provider := a.manager.GetProvider()
 	if provider == nil {
 		err := fmt.Errorf("no llm provider configured")
@@ -438,35 +440,25 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 
 	handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeStart})
 
-	messages := make([]llm.Message, 0)
-	if !req.ContextEmpty {
-		history, err := a.getConversationHistory(req.SessionID)
-		if err != nil {
-			a.markRunError(req, err)
-			handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
-			return err
-		}
-		messages = make([]llm.Message, 0, len(history)+1)
-		for _, msg := range history {
-			role := msg.Role
-			if role == "" {
-				role = "user"
-			}
-			messages = append(messages, llm.Message{Role: role, Content: msg.Content})
-		}
-	}
-
-	if req.InputRole == "" {
-		req.InputRole = "user"
-	}
-	messages = append(messages, llm.Message{Role: req.InputRole, Content: req.Input})
-
 	var systemPrompt string
 	if req.SystemPrompt != "" {
 		systemPrompt = req.SystemPrompt
 	} else {
 		systemPrompt = a.systemPrompt()
 	}
+	messages, err := a.prepareConversationContext(ctx, req, systemPrompt)
+	if err != nil {
+		a.markRunError(req, err)
+		handler.OnEvent(&llm.AgentStreamEvent{Type: llm.EventTypeError, Data: err.Error()})
+		return err
+	}
+	printColored(_colorGray, "Loaded %d historical context messages", len(messages))
+	turnStart := len(messages)
+
+	if req.InputRole == "" {
+		req.InputRole = "user"
+	}
+	messages = append(messages, llm.Message{Role: req.InputRole, Content: req.Input})
 
 	model := a.getModel()
 	toolList := a.toolRegistry.List()
@@ -477,8 +469,14 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 	}
 
 	result := &ExecuteResult{}
+	var lastInputTokens, lastOutputTokens int
+
+	printColored(_colorBold, "Starting execution loop (max iterations: %d)", MaxToolIterations)
 
 	for iteration := 0; iteration < MaxToolIterations; iteration++ {
+		printColored(_colorPurple, "┌─────────────────────────────────────────────────────┐")
+		printColored(_colorPurple, "│ Iteration %d/%d                                      │", iteration+1, MaxToolIterations)
+		printColored(_colorPurple, "└─────────────────────────────────────────────────────┘")
 		handler.OnEvent(&llm.AgentStreamEvent{
 			Type: llm.EventTypeIteration,
 			Data: &llm.IterationEvent{Current: iteration + 1, Max: MaxToolIterations},
@@ -533,6 +531,7 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 
 		result.InputTokens += resp.InputTokens
 		result.OutputTokens += resp.OutputTokens
+		lastInputTokens, lastOutputTokens = resp.InputTokens, resp.OutputTokens
 
 		if resp.ReasonContent != "" {
 			handler.OnEvent(&llm.AgentStreamEvent{
@@ -549,12 +548,18 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 			if iteration > 0 {
 				result.Content = resp.Content
 			}
+			printColored(_colorGreen, "Response complete (no tool calls needed)")
 			break
 		}
 
-		messages = append(messages, llm.Message{Role: "assistant", Content: resp.Content})
+		messages = append(messages, llm.Message{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
 
 		for _, tc := range resp.ToolCalls {
+			printColored(_colorYellow, "Tool call: %s", tc.Function.Name)
 			handler.OnEvent(&llm.AgentStreamEvent{
 				Type: llm.EventTypeToolCall,
 				Data: &llm.ToolCallEvent{
@@ -575,9 +580,11 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 		result.ToolCalls = append(result.ToolCalls, toolResults...)
 
 		for _, tr := range toolResults {
+			printColored(_colorGreen, "Tool result: %s (success: %v)", tr.ToolName, tr.Success)
 			handler.OnEvent(&llm.AgentStreamEvent{
 				Type: llm.EventTypeToolResult,
 				Data: &llm.ToolResultEvent{
+					CallID:   tr.CallID,
 					ToolName: tr.ToolName,
 					Output:   tr.Output,
 					Success:  tr.Success,
@@ -587,7 +594,7 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 
 		for _, tc := range resp.ToolCalls {
 			for _, tr := range toolResults {
-				if tr.ToolName == tc.Function.Name {
+				if tr.CallID == tc.ID {
 					messages = append(messages, llm.Message{
 						Role:       "tool",
 						Content:    tr.Output,
@@ -609,8 +616,14 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 			slog.Warn("failed to save tool calls", "session_id", req.SessionID, "error", err)
 		}
 	}
+	result.ContextUsage = a.calculateContextUsage(systemPrompt, messages, result.Content, toolList, lastInputTokens, lastOutputTokens)
+	a.persistContextTurn(req.SessionID, messages[turnStart:], result.Content)
 
 	a.markRunSuccess(req, result, provider.GetName(), model, len(messages))
+	a.scheduleMemoryExtraction(req, result)
+
+	printColored(_colorGreen, "Agent execution completed successfully")
+	printColored(_colorGray, "Tokens used - Input: %d, Output: %d", result.InputTokens, result.OutputTokens)
 
 	handler.OnEvent(&llm.AgentStreamEvent{
 		Type: llm.EventTypeComplete,
@@ -619,6 +632,7 @@ func (a *Agent) ExecuteStream(ctx context.Context, req ExecuteRequest, handler l
 			InputTokens:  result.InputTokens,
 			OutputTokens: result.OutputTokens,
 			MessageID:    messageID,
+			ContextUsage: result.ContextUsage,
 		},
 	})
 

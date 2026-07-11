@@ -15,6 +15,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/zerolog v1.31.0
 	github.com/spf13/viper v1.18.2
+	github.com/yuin/goldmark v1.8.2
 	gopkg.in/yaml.v2 v2.2.8
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/sqlite v1.5.4

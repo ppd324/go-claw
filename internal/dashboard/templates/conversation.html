@@ -183,6 +183,9 @@ function handleStreamEvent(event) {
                 currentStreamContent = event.data.content;
                 updateAssistantMessageContent(currentStreamContent);
             }
+			if (event.data) {
+				renderLastAssistantMarkdown(currentStreamContent);
+			}
             if (event.data && event.data.message_id) {
                 const container = document.getElementById('messages');
                 const lastMessage = container.querySelector('.message.assistant:last-child');
@@ -190,6 +193,9 @@ function handleStreamEvent(event) {
                     lastMessage.setAttribute('data-message-id', event.data.message_id);
                 }
             }
+			if (event.data && event.data.context_usage) {
+				updateContextUsage(event.data.context_usage);
+			}
             isSending = false;
             updateSendButton(false);
             updateSessionInfo();
@@ -208,10 +214,50 @@ function updateAssistantMessageContent(content) {
     const lastMessage = container.querySelector('.message.assistant:last-child');
     
     if (lastMessage) {
-        const contentEl = lastMessage.querySelector('.message-content');
-        contentEl.innerHTML = escapeHtml(content);
+		const contentEl = lastMessage.querySelector('.markdown-content');
+		contentEl.textContent = content;
     }
     container.scrollTop = container.scrollHeight;
+}
+
+async function renderLastAssistantMarkdown(content) {
+	const container = document.getElementById('messages');
+	const lastMessage = container.querySelector('.message.assistant:last-child');
+	if (!lastMessage) return;
+	const markdownEl = lastMessage.querySelector('.markdown-content');
+	if (!markdownEl) return;
+	const expectedContent = content;
+	try {
+		const response = await fetch('/api/markdown', {
+			method: 'POST',
+			headers: {'Content-Type': 'application/json'},
+			body: JSON.stringify({content: expectedContent})
+		});
+		if (!response.ok) return;
+		const data = await response.json();
+		if (currentStreamContent === expectedContent || markdownEl.textContent === expectedContent) {
+			markdownEl.innerHTML = data.html || '';
+		}
+	} catch (err) {
+		console.error('Markdown render failed:', err);
+	}
+}
+
+function updateContextUsage(usage) {
+    const container = document.getElementById('messages');
+    const lastMessage = container.querySelector('.message.assistant:last-child');
+    if (!lastMessage || !usage) return;
+    const body = lastMessage.querySelector('.message-body');
+    let el = body.querySelector('.context-usage');
+    if (!el) {
+        el = document.createElement('div');
+        el.className = 'context-usage';
+        body.appendChild(el);
+    }
+    const used = Number(usage.used_tokens || 0).toLocaleString();
+    const windowSize = Number(usage.window_tokens || 0).toLocaleString();
+    const estimated = usage.estimated ? '约 ' : '';
+    el.textContent = `上下文 ${estimated}${used} / ${windowSize} tokens（${usage.percent || 0}%）`;
 }
 
 function updateAssistantMessageWithTools(content, toolCalls) {
@@ -243,8 +289,8 @@ function updateAssistantMessageWithTools(content, toolCalls) {
     }
 
     if (lastMessage) {
-        const contentEl = lastMessage.querySelector('.message-content');
-        contentEl.innerHTML = escapeHtml(content) + toolCallsHtml;
+		const contentEl = lastMessage.querySelector('.message-content');
+		contentEl.innerHTML = `<div class="markdown-content">${escapeHtml(content)}</div>${toolCallsHtml}`;
     }
     
     container.scrollTop = container.scrollHeight;
@@ -292,6 +338,9 @@ function handleNewMessage(payload) {
     
     if (payload.content) {
         appendMessage('assistant', payload.content, payload.tool_calls || []);
+		const markdownEl = document.querySelector('.message.assistant:last-child .markdown-content');
+		if (markdownEl && payload.content_html) markdownEl.innerHTML = payload.content_html;
+		updateContextUsage(payload.context_usage);
     }
     
     updateSessionInfo();
@@ -348,7 +397,7 @@ function renderMessages(messages) {
                     <div class="message-avatar">🤖</div>
                     <div class="message-body">
                         <div class="message-role">助手</div>
-                        <div class="message-content">${escapeHtml(msg.content || '')}${toolCallsHtml}</div>
+						<div class="message-content"><div class="markdown-content">${msg.content_html || escapeHtml(msg.content || '')}</div>${toolCallsHtml}</div>
                     </div>
                 </div>
             `;
@@ -360,7 +409,7 @@ function renderMessages(messages) {
                     </div>
                     <div class="message-body">
                         <div class="message-role">${isUser ? '用户' : '助手'}</div>
-                        <div class="message-content">${escapeHtml(msg.content || '')}</div>
+						<div class="message-content">${isUser ? escapeHtml(msg.content || '') : `<div class="markdown-content">${msg.content_html || escapeHtml(msg.content || '')}</div>`}</div>
                     </div>
                 </div>
             `;
@@ -405,7 +454,7 @@ function appendMessage(role, content, toolCalls = []) {
             </div>
             <div class="message-body">
                 <div class="message-role">${isUser ? '用户' : '助手'}</div>
-                <div class="message-content">${escapeHtml(content)}${toolCallsHtml}</div>
+				<div class="message-content">${isUser ? escapeHtml(content) : `<div class="markdown-content">${escapeHtml(content)}</div>${toolCallsHtml}`}</div>
             </div>
         </div>
     `;
@@ -498,6 +547,9 @@ async function sendMessage() {
             }
             
             appendMessage('assistant', data.content || '', data.tool_calls || []);
+			const lastAssistant = document.querySelector('.message.assistant:last-child .markdown-content');
+			if (lastAssistant && data.content_html) lastAssistant.innerHTML = data.content_html;
+            updateContextUsage(data.context_usage);
         } catch (err) {
             showChatBanner('请求失败：' + err.message, true);
         }

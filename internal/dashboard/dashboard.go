@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -17,7 +18,12 @@ import (
 	"go-claw/internal/notify"
 	"go-claw/internal/scheduler"
 	"go-claw/internal/storage"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 )
+
+var dashboardMarkdown = goldmark.New(goldmark.WithExtensions(extension.GFM))
 
 type WebSocketNotifier interface {
 	BroadcastNewMessage(sessionID string, message map[string]interface{})
@@ -128,6 +134,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sessions", s.handleAPISessions)
 	mux.HandleFunc("/api/session", s.handleAPISession)
 	mux.HandleFunc("/api/messages", s.handleAPIMessages)
+	mux.HandleFunc("/api/markdown", s.handleAPIMarkdown)
 	mux.HandleFunc("/api/config", s.handleAPIConfig)
 	mux.HandleFunc("/api/dashboard/stats", s.handleAPIStats)
 	mux.HandleFunc("/api/workspace/files", s.handleAPIWorkspaceFiles)
@@ -435,6 +442,9 @@ func (s *Server) handleAPISession(w http.ResponseWriter, r *http.Request) {
 			"role":       msg.Role,
 			"created_at": msg.CreatedAt,
 		}
+		if msg.Role == "assistant" {
+			msgData["content_html"] = renderDashboardMarkdown(msg.Content)
+		}
 
 		// 如果是 assistant 消息，查询关联的工具调用
 		if msg.Role == "assistant" {
@@ -526,6 +536,7 @@ func (s *Server) handleAPIMessages(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]any{
 		"content":       result.Content,
+		"content_html":  renderDashboardMarkdown(result.Content),
 		"input_tokens":  result.InputTokens,
 		"output_tokens": result.OutputTokens,
 		"stop_reason":   result.StopReason,
@@ -533,6 +544,7 @@ func (s *Server) handleAPIMessages(w http.ResponseWriter, r *http.Request) {
 		"user_message":  userMsg,
 		"assistant_msg": assistantMsg,
 		"tool_calls":    result.ToolCalls,
+		"context_usage": result.ContextUsage,
 	}
 
 	// Send WebSocket notification
@@ -540,6 +552,30 @@ func (s *Server) handleAPIMessages(w http.ResponseWriter, r *http.Request) {
 	s.NotifyNewMessage(session.SessionID, response)
 
 	s.JSON(w, response)
+}
+
+func (s *Server) handleAPIMarkdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	if err := decoder.Decode(&req); err != nil {
+		s.JSONError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	s.JSON(w, map[string]string{"html": renderDashboardMarkdown(req.Content)})
+}
+
+func renderDashboardMarkdown(content string) string {
+	var output bytes.Buffer
+	if err := dashboardMarkdown.Convert([]byte(content), &output); err != nil {
+		return template.HTMLEscapeString(content)
+	}
+	return output.String()
 }
 
 func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {

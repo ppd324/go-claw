@@ -45,7 +45,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	// Build request
 	payload := map[string]interface{}{
 		"model":    model,
-		"messages": req.Messages,
+		"messages": messagesWithSystemPrompt(req),
 		"stream":   false,
 	}
 
@@ -97,7 +97,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req *ChatRequest, handl
 
 	payload := map[string]interface{}{
 		"model":    model,
-		"messages": req.Messages,
+		"messages": messagesWithSystemPrompt(req),
 		"stream":   true,
 	}
 

@@ -28,6 +28,8 @@ type Manager struct {
 	tempAgents     map[uint]*Agent
 	tempAgentID    uint
 	tempAgentMu    sync.Mutex
+	memoryMu       sync.Mutex
+	contextStore   *ContextStore
 }
 
 type TempAgentOptions struct {
@@ -77,13 +79,18 @@ func NewManager(cfg *config.Config, repo *storage.Repository, baseDir string) *M
 		workspace:      workspace,
 		tempAgents:     make(map[uint]*Agent),
 	}
+	m.contextStore = NewContextStore(filepath.Join(workspace, "sessions"), cfg.Context)
+	if err := m.refreshMemoryIndex(); err != nil {
+		slog.Warn("failed to refresh memory index", "error", err)
+	}
 
-	defaultRegistry := tools.NewDefaultToolRegistry(baseDir)
-	defaultRegistry.Register(tools.NewCreateSkillTool(skillMgr))
+	// File tools must resolve relative paths against the effective workspace.
+	// baseDir may be empty when the workspace comes from config.WorkDir.
+	defaultRegistry := tools.NewDefaultToolRegistry(workspace)
 	defaultRegistry.Register(tools.NewListSkillsTool(skillMgr))
 	defaultRegistry.Register(tools.NewGetSkillTool(skillMgr))
-	defaultRegistry.Register(tools.NewUpdateSkillTool(skillMgr))
-	defaultRegistry.Register(tools.NewDeleteSkillTool(skillMgr))
+	//defaultRegistry.Register(tools.NewUpdateSkillTool(skillMgr))
+	//defaultRegistry.Register(tools.NewDeleteSkillTool(skillMgr))
 	m.toolRegistry = defaultRegistry.ToolRegistry
 
 	defaultRegistry.Register(tools.NewSubAgentTool(NewSubAgentAdapter(m)))

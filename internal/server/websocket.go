@@ -299,7 +299,7 @@ func (s *WebSocketServer) handleChatMessage(client *Client, payload json.RawMess
 	if msg.Stream {
 		s.handleStreamMessage(ctx, client, agentInstance, msg.Content, session)
 	} else {
-		response, err := agentInstance.ProcessMessage(ctx, msg.Content, session.ID)
+		result, err := agentInstance.Execute(ctx, agent.ExecuteRequest{SessionID: session.ID, Input: msg.Content})
 		if err != nil {
 			s.sendError(client, fmt.Sprintf("agent error: %v", err))
 			return
@@ -307,7 +307,7 @@ func (s *WebSocketServer) handleChatMessage(client *Client, payload json.RawMess
 
 		assistantMsg := &storage.Message{
 			MessageID: generateMessageID(),
-			Content:   response,
+			Content:   result.Content,
 			Role:      "assistant",
 			SessionID: session.ID,
 		}
@@ -317,9 +317,10 @@ func (s *WebSocketServer) handleChatMessage(client *Client, payload json.RawMess
 		}
 
 		s.sendMessage(client, "message", map[string]interface{}{
-			"content":    response,
-			"message_id": assistantMsg.MessageID,
-			"session_id": session.SessionID,
+			"content":       result.Content,
+			"message_id":    assistantMsg.MessageID,
+			"session_id":    session.SessionID,
+			"context_usage": result.ContextUsage,
 		})
 	}
 }
